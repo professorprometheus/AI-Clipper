@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ALPHA — research-led clipping</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/"><span>α</span> ALPHA</a>
+    <nav><button class="nav-button active" data-view="campaigns">Campaigns</button><button class="nav-button" data-view="ledger">Research Ledger</button></nav>
+    <div class="mode">LOCAL FIXTURE MODE</div>
+  </header>
+  <main>
+    <section id="campaigns-view">
+      <div class="hero">
+        <div><p class="eyebrow">Quantitative social intelligence</p><h1>Find the clip worth publishing.</h1><p>Research the market, search every approved source, enforce campaign rules, then keep a human in control.</p></div>
+        <button id="new-campaign" class="primary">New campaign</button>
+      </div>
+      <div id="notice" class="notice hidden"></div>
+      <div id="campaign-list" class="campaign-grid"></div>
+      <section id="campaign-form" class="panel hidden">
+        <div class="panel-head"><div><p class="eyebrow">Campaign intake</p><h2>Create a campaign</h2></div><button class="quiet" id="close-form">Close</button></div>
+        <form id="create-form">
+          <div class="form-grid">
+            <label>Campaign name<input name="name" required value="Creator growth demo"></label>
+            <label>Review email<input name="owner_email" type="email" required value="reviewer@example.com"></label>
+            <label>Payout per qualified view (£)<input name="payout_value" type="number" min="0" step="0.01" value="1.50"></label>
+            <label>Target platform<select name="target_platform"><option>manual_export</option><option>tiktok</option><option>instagram</option><option>youtube_shorts</option></select></label>
+          </div>
+          <label>Approved sources <span>one URL per line; YouTube playlists are expanded</span><textarea name="sources" required rows="5">https://youtube.com/playlist?list=alpha-demo
+https://youtube.com/watch?v=alpha-second</textarea></label>
+          <label>Successful example clips <span>one URL per line</span><textarea name="examples" rows="4">https://example.com/clips/winner-1
+https://example.com/clips/winner-2
+https://example.com/clips/winner-3</textarea></label>
+          <label>Research seeds <span>one topic, keyword, or account per line</span><textarea name="seeds" rows="3">creator growth
+attention hooks</textarea></label>
+          <fieldset><legend>Deterministic branding</legend><div class="form-grid">
+            <label class="check"><input name="watermark_required" type="checkbox" checked> Watermark required</label>
+            <label>Watermark asset<input name="watermark_file" type="file" accept="image/png,image/jpeg,image/webp,.ppm"></label>
+            <label>Position<select name="watermark_position"><option>bottom_right</option><option>bottom_left</option><option>top_right</option><option>top_left</option><option>center</option></select></label>
+            <label>Size (%)<input name="watermark_size" type="number" min="2" max="100" value="18"></label>
+            <label>Opacity (%)<input name="watermark_opacity" type="number" min="0" max="100" value="85"></label>
+            <label>Padding (px)<input name="watermark_padding" type="number" min="0" max="500" value="24"></label>
+          </div></fieldset>
+          <div class="actions"><button class="primary" type="submit">Create and submit</button><span class="muted">You can close this page after submitting.</span></div>
+        </form>
+      </section>
+      <section id="campaign-detail" class="hidden"></section>
+    </section>
+    <section id="ledger-view" class="hidden"><div class="hero"><div><p class="eyebrow">Auditable learning</p><h1>Research Ledger</h1><p>Predictions, hypotheses, evidence and policy decisions stay separate from outcomes.</p></div></div><div id="ledger-list"></div></section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>
+

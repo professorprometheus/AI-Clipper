@@ -1,0 +1,13 @@
+services:
+  api:
+    build: .
+    ports: ["8000:8000"]
+    volumes: ["alpha-data:/data"]
+  worker:
+    build: .
+    command: ["python", "-m", "alpha.worker"]
+    volumes: ["alpha-data:/data"]
+    depends_on: [api]
+volumes:
+  alpha-data:
+

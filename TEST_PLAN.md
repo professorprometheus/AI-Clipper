@@ -88,3 +88,24 @@ Simulate a long logical job:
 - verify no duplicated side effects.
 
 The test does not need to run for 72 wall-clock hours. It must prove the architecture does not depend on a 72-hour-lived process.
+
+## Implemented automated coverage (2026-08-10)
+
+- `tests/test_api_e2e.py`: full fixture path, real FFmpeg renders, research outlier discrimination, evidence and style output, pre-approval publish denial, natural-language child edit, approval, idempotent export, performance, feedback, one email and ledger policy provenance.
+- `tests/test_api_e2e.py`: 25 approved sources + 25 examples and duplicate URL rejection.
+- `tests/test_durability_and_rules.py`: four completed stages across short worker executions, abandoned lease aged by 73 hours, replacement worker, injected transient provider failure/retry, no duplicate completed stages/notification.
+- `tests/test_durability_and_rules.py`: mandatory missing watermark fails QA and blocks approval/publication.
+- `tests/test_durability_and_rules.py`: experiment evaluation, audited policy activation and rollback to the preserved prior policy.
+- `tests/test_domain.py`: structured edit parsing/application and strict separation of AI-evaluated requirements from deterministic QA.
+
+## Manual UI smoke (2026-08-10)
+
+In the in-app browser against the real local dev server:
+
+1. Opened the campaign dashboard and campaign intake form.
+2. Submitted two approved sources (one playlist), three successful examples, seeds and configurable watermark requirements.
+3. Left the page idle while the background worker progressed; reloaded to `awaiting_review` with three variants.
+4. Inspected source/timestamp, selection explanation, evidence IDs, score breakdown and QA status.
+5. Approved one variant and verified that manual export appeared only after approval.
+6. Prepared the export and opened the populated Research Ledger.
+7. Confirmed no browser console errors or warnings.

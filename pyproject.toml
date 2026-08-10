@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alpha-clipper"
+version = "0.1.0"
+description = "ALPHA V0 research-led, approval-gated social clipping system"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.116,<1",
+  "uvicorn>=0.35,<1",
+  "pydantic>=2.11,<3",
+  "email-validator>=2.2,<3",
+  "python-multipart>=0.0.20,<1",
+  "imageio-ffmpeg>=0.6,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.28,<1",
+  "pytest>=8.4,<10",
+  "ruff>=0.12,<1",
+]
+
+[project.scripts]
+alpha-api = "alpha.main:run"
+alpha-worker = "alpha.worker:main"
+alpha-seed = "alpha.seed:main"
+alpha-maintain = "alpha.ops:main"
+
+[tool.setuptools.packages.find]
+include = ["alpha*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+ignore = ["E501"]
