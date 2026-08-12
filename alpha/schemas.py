@@ -26,6 +26,14 @@ class RequirementInput(BaseModel):
     source_text: str | None = None
 
 
+class RequirementUpdate(BaseModel):
+    value: Any
+    reason: str = Field(min_length=3, max_length=1000)
+    operator: Literal["eq", "min", "max", "contains", "present"] | None = None
+    severity: Literal["mandatory", "warning"] | None = None
+    source_text: str | None = None
+
+
 class WatermarkInput(BaseModel):
     data_base64: str | None = None
     filename: str = "watermark.ppm"
@@ -48,7 +56,8 @@ class CampaignCreate(BaseModel):
     deadline: str | None = None
     research_seeds: list[str] = Field(default_factory=list, max_length=100)
     target_platforms: list[str] = Field(default_factory=lambda: ["manual_export"])
-    sources: list[SourceInput] = Field(min_length=1, max_length=500)
+    target_account_ids: list[str] = Field(default_factory=list, max_length=100)
+    sources: list[SourceInput] = Field(default_factory=list, max_length=500)
     successful_examples: list[ExampleInput] = Field(default_factory=list, max_length=500)
     requirements: list[RequirementInput] = Field(default_factory=list, max_length=200)
     watermark: WatermarkInput | None = None
@@ -71,7 +80,21 @@ class CampaignCreate(BaseModel):
 
 class ReviewInput(BaseModel):
     decision: Literal["approve", "change", "reject"]
-    reason_code: str | None = None
+    reason_code: (
+        Literal[
+            "bad_moment",
+            "weak_hook",
+            "bad_editing",
+            "wrong_topic",
+            "too_much_context",
+            "captions",
+            "crop",
+            "missed_requirement",
+            "overdone_saturated",
+            "other",
+        ]
+        | None
+    ) = None
     feedback_text: str | None = None
 
     @model_validator(mode="after")
@@ -91,7 +114,23 @@ class PublishInput(BaseModel):
 
 class FeedbackInput(BaseModel):
     rating: int | None = Field(default=None, ge=1, le=5)
-    reason_code: str | None = None
+    reason_code: (
+        Literal[
+            "bad_moment",
+            "weak_hook",
+            "bad_editing",
+            "wrong_topic",
+            "too_much_context",
+            "captions",
+            "crop",
+            "missed_requirement",
+            "overdone_saturated",
+            "market_outperformed_preference",
+            "preference_outperformed_market",
+            "other",
+        ]
+        | None
+    ) = None
     feedback_text: str | None = None
     human_minutes: float | None = Field(default=None, ge=0)
     clip_variant_id: str | None = None
@@ -114,3 +153,53 @@ class ExperimentInput(BaseModel):
     hypothesis: str = Field(min_length=1)
     treatment_weights: dict[str, float]
     allocation: float = Field(default=0.15, gt=0, lt=1)
+
+
+class ImportedTranscriptSegment(BaseModel):
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(gt=0)
+    text: str = Field(min_length=1, max_length=10_000)
+
+    @model_validator(mode="after")
+    def valid_window(self) -> ImportedTranscriptSegment:
+        if self.end_ms <= self.start_ms:
+            raise ValueError("transcript end_ms must be greater than start_ms")
+        return self
+
+
+class LoginInput(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=1, max_length=1000)
+
+
+class ConnectedAccountCreate(BaseModel):
+    platform: str = Field(min_length=1, max_length=100)
+    display_name: str = Field(min_length=1, max_length=200)
+    adapter: Literal["manual_export"] = "manual_export"
+
+
+class ResearchObservationInput(BaseModel):
+    platform: str = Field(min_length=1, max_length=100)
+    url: HttpUrl
+    creator: str = Field(min_length=1, max_length=300)
+    published_hours_ago: float = Field(ge=0)
+    metrics: dict[str, float | int]
+    creator_baseline: dict[str, float | int]
+    transcript: str = Field(min_length=1, max_length=100_000)
+    labels: dict[str, str]
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def research_fields(self) -> ResearchObservationInput:
+        if "views" not in self.metrics:
+            raise ValueError("research metrics require views")
+        if "median_views" not in self.creator_baseline:
+            raise ValueError("creator baseline requires median_views")
+        if not self.labels.get("topic") or not self.labels.get("angle"):
+            raise ValueError("research labels require topic and angle")
+        return self
+
+
+class ResearchImportBatch(BaseModel):
+    provenance: str = Field(min_length=5, max_length=2000)
+    observations: list[ResearchObservationInput] = Field(min_length=1, max_length=5000)

@@ -89,23 +89,27 @@ Simulate a long logical job:
 
 The test does not need to run for 72 wall-clock hours. It must prove the architecture does not depend on a 72-hour-lived process.
 
-## Implemented automated coverage (2026-08-10)
+## Implemented automated coverage (2026-08-12)
 
-- `tests/test_api_e2e.py`: full fixture path, real FFmpeg renders, research outlier discrimination, evidence and style output, pre-approval publish denial, natural-language child edit, approval, idempotent export, performance, feedback, one email and ledger policy provenance.
+- `tests/test_api_e2e.py`: full fixture path, real FFmpeg renders, research outlier discrimination, evidence and style output, campaign-scoped account selection, pre-approval/wrong-account publish denial, natural-language child edit, approval, idempotent export, computed performance ratios, feedback taxonomy, one email and ledger policy provenance.
 - `tests/test_api_e2e.py`: 25 approved sources + 25 examples and duplicate URL rejection.
-- `tests/test_durability_and_rules.py`: four completed stages across short worker executions, abandoned lease aged by 73 hours, replacement worker, injected transient provider failure/retry, no duplicate completed stages/notification.
-- `tests/test_durability_and_rules.py`: mandatory missing watermark fails QA and blocks approval/publication.
-- `tests/test_durability_and_rules.py`: experiment evaluation, audited policy activation and rollback to the preserved prior policy.
+- `tests/test_durability_and_rules.py`: four completed stages across short worker executions, abandoned lease aged by 73 hours, replacement worker, injected transient failure, persisted bounded backoff, separate attempt history, no duplicate completed stages/notification, active heartbeat and duplicate-worker exclusion during a long stage.
+- `tests/test_durability_and_rules.py`: terminal failure emits exactly one secret-redacted attention email.
+- `tests/test_durability_and_rules.py`: rights-attested local video/transcript import, duplicate detection, semantic source/timestamp search, real-source cut/render, output probe, deterministic QA and repeated-render checksum.
+- `tests/test_durability_and_rules.py`: mandatory missing watermark fails QA and blocks approval/publication; an audited rule revision re-evaluates QA and permits approval.
+- `tests/test_durability_and_rules.py`: deterministic pre-score control/treatment assignment, arm outcome summaries, experiment evaluation, audited policy activation and rollback.
+- `tests/test_auth.py`: unauthenticated denial, failed/correct login, hashed session persistence, CSRF enforcement, authenticated write, logout and fail-closed configuration.
+- `tests/test_research_import.py`: audited manual observations, AI-adapter query generation, expected relative outliers, cluster detection, creator profiles and raw/derived evidence separation.
+- `tests/test_ops.py`: deployment diagnostics cover migrations, storage round-trip, FFmpeg and authentication configuration.
 - `tests/test_domain.py`: structured edit parsing/application and strict separation of AI-evaluated requirements from deterministic QA.
 
-## Manual UI smoke (2026-08-10)
+## Manual UI smoke (2026-08-12)
 
 In the in-app browser against the real local dev server:
 
-1. Opened the campaign dashboard and campaign intake form.
-2. Submitted two approved sources (one playlist), three successful examples, seeds and configurable watermark requirements.
-3. Left the page idle while the background worker progressed; reloaded to `awaiting_review` with three variants.
-4. Inspected source/timestamp, selection explanation, evidence IDs, score breakdown and QA status.
-5. Approved one variant and verified that manual export appeared only after approval.
-6. Prepared the export and opened the populated Research Ledger.
-7. Confirmed no browser console errors or warnings.
+1. Opened the protected dashboard and verified that an unauthenticated browser receives the login screen.
+2. Signed in with the configured administrator and opened campaign intake.
+3. Submitted two approved sources (one playlist), three successful examples, seeds, a selected manual-export account and configurable watermark requirements; the browser sent authenticated CSRF-protected writes.
+4. Left the page idle while the durable worker progressed; reloaded to `awaiting_review` with three QA-passed variants and enabled approval actions.
+5. Inspected source/timestamp, selection explanation, evidence IDs, score breakdown and compliance state.
+6. Opened the populated Research Ledger and verified its recorded policy recommendation.

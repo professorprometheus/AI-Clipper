@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -20,13 +23,16 @@ from .domain import (
     weighted_score,
 )
 from .providers import (
+    AIAdapter,
     EmailAdapter,
     FileEmailAdapter,
     FixtureResearchProvider,
     FixtureSourceProvider,
+    LocalHeuristicAIAdapter,
     LocalStorageAdapter,
     ManualExportAdapter,
     ManualImportSourceProvider,
+    ManualResearchProvider,
     PublicationAdapter,
     Renderer,
     ResearchProvider,
@@ -50,6 +56,23 @@ STAGES = [
 ]
 
 
+def redact_secrets(message: str) -> str:
+    patterns = [
+        r"(?i)(api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|secret)\s*[:=]\s*[^\s,;&]+",
+        r"(?i)bearer\s+[a-z0-9._~+/-]+=*",
+    ]
+    redacted = message
+    for pattern in patterns:
+        redacted = re.sub(
+            pattern,
+            lambda match: (
+                f"{match.group(1)}=[REDACTED]" if match.lastindex else "Bearer [REDACTED]"
+            ),
+            redacted,
+        )
+    return redacted[:2000]
+
+
 @dataclass
 class Providers:
     storage: LocalStorageAdapter
@@ -58,6 +81,7 @@ class Providers:
     email: EmailAdapter
     publication: PublicationAdapter
     renderer: Renderer
+    ai: AIAdapter
 
     @classmethod
     def build(cls, settings: Settings) -> Providers:
@@ -70,10 +94,13 @@ class Providers:
         return cls(
             storage=storage,
             source=source,
-            research=FixtureResearchProvider(),
+            research=FixtureResearchProvider()
+            if settings.provider_mode == "fixture"
+            else ManualResearchProvider(),
             email=FileEmailAdapter(settings.email_sink_path),
             publication=ManualExportAdapter(storage),
             renderer=Renderer(storage),
+            ai=LocalHeuristicAIAdapter(),
         )
 
 
@@ -122,7 +149,7 @@ class Pipeline:
         job_id = uid()
         self.db.execute(
             "INSERT INTO pipeline_jobs(id,campaign_id,job_type,status,current_stage,checkpoint_json,"
-            "idempotency_key,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            "idempotency_key,available_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
             (
                 job_id,
                 campaign_id,
@@ -131,6 +158,7 @@ class Pipeline:
                 STAGES[0],
                 dump({"completed_stages": []}),
                 idempotency_key,
+                timestamp,
                 timestamp,
                 timestamp,
             ),
@@ -147,16 +175,17 @@ class Pipeline:
         with self.db.transaction(immediate=True) as connection:
             row = connection.execute(
                 "SELECT * FROM pipeline_jobs WHERE "
-                "status IN ('queued','retry') OR (status='leased' AND lease_expires_at < ?) "
+                "status='queued' OR (status='retry' AND (available_at IS NULL OR available_at<=?)) "
+                "OR (status='leased' AND lease_expires_at < ?) "
                 "ORDER BY created_at LIMIT 1",
-                (timestamp,),
+                (timestamp, timestamp),
             ).fetchone()
             if not row:
                 return None
             job = dict(row)
             connection.execute(
                 "UPDATE pipeline_jobs SET status='leased',worker_token=?,lease_expires_at=?,"
-                "heartbeat_at=?,updated_at=? WHERE id=?",
+                "heartbeat_at=?,available_at=NULL,updated_at=? WHERE id=?",
                 (worker_token, lease, timestamp, timestamp, job["id"]),
             )
             job.update(
@@ -182,13 +211,68 @@ class Pipeline:
         stage_run_id = uid()
         started = now()
         self.db.execute(
-            "INSERT OR REPLACE INTO stage_runs(id,job_id,stage,status,attempt,output_json,started_at) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (stage_run_id, job["id"], stage, "running", job["attempts"] + 1, "{}", started),
+            "INSERT INTO pipeline_stage_attempts(id,job_id,stage,status,attempt,worker_token,output_json,started_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (
+                stage_run_id,
+                job["id"],
+                stage,
+                "running",
+                job["attempts"] + 1,
+                worker_token,
+                "{}",
+                started,
+            ),
         )
         logger.info(dump({"event": "stage_started", "job_id": job["id"], "stage": stage}))
+        stop_heartbeat = threading.Event()
+        lease_lost = threading.Event()
+
+        def renew_lease() -> None:
+            interval = max(0.1, self.settings.lease_seconds / 3)
+            consecutive_failures = 0
+            while not stop_heartbeat.wait(interval):
+                try:
+                    if self.heartbeat(job["id"], worker_token):
+                        consecutive_failures = 0
+                        self.db.execute(
+                            "UPDATE pipeline_stage_attempts SET heartbeat_count=heartbeat_count+1 WHERE id=?",
+                            (stage_run_id,),
+                        )
+                    else:
+                        consecutive_failures += 1
+                except Exception:
+                    consecutive_failures += 1
+                    logger.warning(
+                        dump(
+                            {
+                                "event": "heartbeat_failed",
+                                "job_id": job["id"],
+                                "stage": stage,
+                                "consecutive_failures": consecutive_failures,
+                            }
+                        )
+                    )
+                if consecutive_failures >= 3:
+                    lease_lost.set()
+                    return
+
+        heartbeat_thread = threading.Thread(
+            target=renew_lease,
+            name=f"alpha-heartbeat-{job['id']}",
+            daemon=True,
+        )
+        heartbeat_thread.start()
         try:
             output = self.stage_handlers[stage](job["campaign_id"], job["id"])
+            stop_heartbeat.set()
+            heartbeat_thread.join(timeout=max(1.0, self.settings.lease_seconds))
+            if lease_lost.is_set():
+                self.db.execute(
+                    "UPDATE pipeline_stage_attempts SET status='lease_lost',output_json=?,completed_at=? WHERE id=?",
+                    (dump({"stage_output": output}), now(), stage_run_id),
+                )
+                return {"job_id": job["id"], "stage": stage, "status": "lease_lost"}
             checkpoint = load(job["checkpoint_json"], {"completed_stages": []})
             completed = list(dict.fromkeys([*checkpoint.get("completed_stages", []), stage]))
             checkpoint.update({"completed_stages": completed, "last_output": output})
@@ -196,37 +280,107 @@ class Pipeline:
             final = index == len(STAGES) - 1
             next_stage = stage if final else STAGES[index + 1]
             status = "awaiting_review" if final else "queued"
-            self.db.execute(
+            updated = self.db.execute(
                 "UPDATE pipeline_jobs SET status=?,current_stage=?,checkpoint_json=?,worker_token=NULL,"
-                "lease_expires_at=NULL,error_json=NULL,updated_at=? WHERE id=? AND worker_token=?",
-                (status, next_stage, dump(checkpoint), now(), job["id"], worker_token),
+                "lease_expires_at=NULL,available_at=?,error_json=NULL,attempts=0,updated_at=? "
+                "WHERE id=? AND worker_token=? AND status='leased'",
+                (status, next_stage, dump(checkpoint), now(), now(), job["id"], worker_token),
             )
+            if not updated:
+                self.db.execute(
+                    "UPDATE pipeline_stage_attempts SET status='lease_lost',output_json=?,completed_at=? WHERE id=?",
+                    (dump({"stage_output": output}), now(), stage_run_id),
+                )
+                return {"job_id": job["id"], "stage": stage, "status": "lease_lost"}
             self.db.execute(
-                "UPDATE stage_runs SET status='completed',output_json=?,completed_at=? WHERE id=?",
+                "UPDATE pipeline_stage_attempts SET status='completed',output_json=?,completed_at=? WHERE id=?",
                 (dump(output), now(), stage_run_id),
             )
             logger.info(dump({"event": "stage_completed", "job_id": job["id"], "stage": stage}))
             return {"job_id": job["id"], "stage": stage, "status": status, "output": output}
         except Exception as exc:
+            stop_heartbeat.set()
+            heartbeat_thread.join(timeout=max(1.0, self.settings.lease_seconds))
             attempts = int(job["attempts"]) + 1
-            status = "failed" if attempts >= 5 else "retry"
+            status = "failed" if attempts >= self.settings.max_job_attempts else "retry"
+            backoff_seconds = min(
+                300.0,
+                max(0.0, self.settings.retry_base_seconds) * (2 ** max(0, attempts - 1)),
+            )
+            available_at = (datetime.now(UTC) + timedelta(seconds=backoff_seconds)).isoformat()
             error = {
                 "type": type(exc).__name__,
-                "message": str(exc),
+                "message": redact_secrets(str(exc)),
                 "stage": stage,
                 "retryable": status == "retry",
             }
-            self.db.execute(
+            updated = self.db.execute(
                 "UPDATE pipeline_jobs SET status=?,attempts=?,error_json=?,worker_token=NULL,"
-                "lease_expires_at=NULL,updated_at=? WHERE id=?",
-                (status, attempts, dump(error), now(), job["id"]),
+                "lease_expires_at=NULL,available_at=?,updated_at=? "
+                "WHERE id=? AND worker_token=? AND status='leased'",
+                (
+                    status,
+                    attempts,
+                    dump(error),
+                    available_at,
+                    now(),
+                    job["id"],
+                    worker_token,
+                ),
             )
             self.db.execute(
-                "UPDATE stage_runs SET status='failed',output_json=?,completed_at=? WHERE id=?",
+                "UPDATE pipeline_stage_attempts SET status='failed',output_json=?,completed_at=? WHERE id=?",
                 (dump(error), now(), stage_run_id),
             )
-            logger.exception("stage failed", extra={"job_id": job["id"], "stage": stage})
+            if status == "failed" and updated:
+                self._notify_terminal_failure(job, stage, error)
+            logger.error(
+                dump(
+                    {
+                        "event": "stage_failed",
+                        "job_id": job["id"],
+                        "stage": stage,
+                        "error": error,
+                    }
+                )
+            )
             return {"job_id": job["id"], "stage": stage, "status": status, "error": error}
+
+    def _notify_terminal_failure(
+        self, job: dict[str, Any], stage: str, error: dict[str, Any]
+    ) -> None:
+        campaign = self._campaign(job["campaign_id"])
+        key = f"failed-needs-attention:{job['id']}:{stage}"
+        if self.db.one("SELECT id FROM notifications WHERE idempotency_key=?", (key,)):
+            return
+        body = (
+            f"ALPHA could not complete stage '{stage}' after bounded retries. "
+            f"Error class: {error['type']}. Open the campaign: "
+            f"{self.settings.base_url}/?campaign={job['campaign_id']}"
+        )
+        uri = self.providers.email.send(
+            campaign["owner_email"],
+            f"{campaign['name']} needs attention",
+            body,
+            key,
+        )
+        self.db.execute(
+            "INSERT INTO notifications(id,campaign_id,notification_type,idempotency_key,recipient,file_uri,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                uid(),
+                job["campaign_id"],
+                "failed_needs_attention",
+                key,
+                campaign["owner_email"],
+                uri,
+                now(),
+            ),
+        )
+        self.db.execute(
+            "UPDATE campaigns SET status='failed_needs_attention',updated_at=? WHERE id=?",
+            (now(), job["campaign_id"]),
+        )
 
     def run_until_idle(
         self, worker_token: str = "worker", limit: int = 100
@@ -269,9 +423,35 @@ class Pipeline:
         sources = self.db.all("SELECT * FROM approved_sources WHERE campaign_id=?", (campaign_id,))
         count = 0
         for source in sources:
-            for item in self.providers.source.resolve(
-                source["source_type"], source["url"], source["title"]
-            ):
+            if source["source_type"] == "uploaded":
+                imported = self.db.one(
+                    "SELECT * FROM source_imports WHERE approved_source_id=?", (source["id"],)
+                )
+                if not imported:
+                    raise ValueError("uploaded approved source is missing its import record")
+                source_metadata = load(source["metadata_json"], {})
+                probe = source_metadata.get("probe", {})
+                resolved_items = [
+                    {
+                        "external_id": imported["media_sha256"],
+                        "source_url": source["url"],
+                        "title": source["title"] or imported["original_filename"],
+                        "duration_ms": probe.get("duration_ms", 0),
+                        "channel": "authorised_upload",
+                        "metadata": {
+                            "provider": "authorised_upload",
+                            "asset_uri": imported["media_uri"],
+                            "media_sha256": imported["media_sha256"],
+                            "probe": probe,
+                            "rights_attested_at": imported["rights_attested_at"],
+                        },
+                    }
+                ]
+            else:
+                resolved_items = self.providers.source.resolve(
+                    source["source_type"], source["url"], source["title"]
+                )
+            for item in resolved_items:
                 self.db.execute(
                     "INSERT OR IGNORE INTO source_items(id,approved_source_id,campaign_id,external_id,"
                     "source_url,title,duration_ms,channel,published_at,metadata_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -301,7 +481,17 @@ class Pipeline:
         seeds = load(campaign["research_seeds_json"], [])
         items = self.db.all("SELECT * FROM source_items WHERE campaign_id=?", (campaign_id,))
         for item in items:
-            for segment in self.providers.source.transcript(item, seeds):
+            metadata = load(item["metadata_json"], {})
+            if metadata.get("provider") == "authorised_upload":
+                imported = self.db.one(
+                    "SELECT i.transcript_json FROM source_imports i "
+                    "JOIN source_items s ON s.approved_source_id=i.approved_source_id WHERE s.id=?",
+                    (item["id"],),
+                )
+                segments = load(imported["transcript_json"], []) if imported else []
+            else:
+                segments = self.providers.source.transcript(item, seeds)
+            for segment in segments:
                 self.db.execute(
                     "INSERT OR IGNORE INTO transcript_segments(id,source_item_id,start_ms,end_ms,text,embedding_json) "
                     "VALUES (?,?,?,?,?,?)",
@@ -327,25 +517,7 @@ class Pipeline:
         )
         analysed = []
         for index, example in enumerate(examples):
-            analysis = {
-                "hook": "contrarian promise",
-                "topic": "campaign-aligned insight",
-                "subtopic": "practical proof",
-                "emotion": "surprise",
-                "controversy": 0.45,
-                "humour": 0.25,
-                "context": "minimal",
-                "structure": ["hook", "proof", "payoff"],
-                "duration_seconds": 28 + (index % 3) * 2,
-                "opening_type": "direct_claim",
-                "headline": "short_bold",
-                "caption_pattern": "medium_chunks",
-                "crop": "speaker_centered_9_16",
-                "pacing": "fast",
-                "ending": "payoff",
-                "evidence": {"example_id": example["id"], "url": example["url"]},
-                "confidence": 0.72,
-            }
+            analysis = self.providers.ai.analyse_example(example, index)
             self.db.execute(
                 "UPDATE successful_examples SET transcript=?,analysis_json=? WHERE id=?",
                 (
@@ -397,7 +569,39 @@ class Pipeline:
     def social_research(self, campaign_id: str, job_id: str) -> dict[str, Any]:
         campaign = self._campaign(campaign_id)
         seeds = load(campaign["research_seeds_json"], [])
+        examples = self.db.all(
+            "SELECT platform,creator,analysis_json FROM successful_examples WHERE campaign_id=?",
+            (campaign_id,),
+        )
+        queries = self.providers.ai.generate_research_queries(campaign, seeds, examples)
+        for query in queries:
+            self.db.execute(
+                "INSERT OR IGNORE INTO research_targets(id,campaign_id,target_type,value) VALUES (?,?,?,?)",
+                (uid(), campaign_id, "generated_query", query),
+            )
         raw = self.providers.research.collect(campaign, seeds)
+        imported = self.db.all(
+            "SELECT * FROM research_imports WHERE campaign_id=? ORDER BY imported_at",
+            (campaign_id,),
+        )
+        raw.extend(
+            {
+                "platform": row["platform"],
+                "url": row["url"],
+                "creator": row["creator"],
+                "published_hours_ago": row["published_hours_ago"],
+                "metrics": load(row["metrics_json"], {}),
+                "baseline": load(row["baseline_json"], {}),
+                "transcript": row["transcript"],
+                "labels": load(row["labels_json"], {}),
+                "raw": {
+                    "research_import_id": row["id"],
+                    "provenance": row["provenance"],
+                    "original": load(row["raw_json"], {}),
+                },
+            }
+            for row in imported
+        )
         observations = []
         for item in raw:
             observation_id = uid()
@@ -430,6 +634,7 @@ class Pipeline:
             observations.append(
                 {
                     "id": stored["id"],
+                    "platform": item["platform"],
                     "creator": item["creator"],
                     "labels": item["labels"],
                     "derived": derived,
@@ -451,11 +656,54 @@ class Pipeline:
                     dump(cluster["evidence_ids"]),
                 ),
             )
+        profile_count = 0
+        creators = {(row["platform"], row["creator"]) for row in observations}
+        for platform, creator in creators:
+            members = [
+                row
+                for row in observations
+                if row["platform"] == platform and row["creator"] == creator
+            ]
+            average_outlier = sum(row["derived"]["relative_outlier"] for row in members) / len(
+                members
+            )
+            profile_metrics = {
+                "observation_count": len(members),
+                "average_relative_outlier": round(average_outlier, 4),
+                "average_view_velocity": round(
+                    sum(row["derived"]["view_velocity"] for row in members) / len(members),
+                    4,
+                ),
+                "angles": sorted({row["labels"]["angle"] for row in members}),
+                "topics": sorted({row["labels"]["topic"] for row in members}),
+            }
+            self.db.execute(
+                "INSERT OR REPLACE INTO creator_profiles(id,campaign_id,platform,creator,metrics_json,"
+                "evidence_ids_json,successful_clipper,created_at) VALUES "
+                "(COALESCE((SELECT id FROM creator_profiles WHERE campaign_id=? AND platform=? AND creator=?),?),?,?,?,?,?,?,?)",
+                (
+                    campaign_id,
+                    platform,
+                    creator,
+                    uid(),
+                    campaign_id,
+                    platform,
+                    creator,
+                    dump(profile_metrics),
+                    dump([row["id"] for row in members]),
+                    int(average_outlier >= 5),
+                    now(),
+                ),
+            )
+            profile_count += 1
         outliers = sum(1 for row in observations if row["derived"]["relative_outlier"] >= 5)
         return {
             "observations": len(observations),
             "outliers": outliers,
             "clusters": len(clusters),
+            "generated_queries": len(queries),
+            "creator_profiles": profile_count,
+            "manual_imports": len(imported),
             "evidence_separated": True,
         }
 
@@ -522,7 +770,26 @@ class Pipeline:
         policy = self.db.one(
             "SELECT * FROM strategy_policies WHERE active=1 ORDER BY version DESC LIMIT 1"
         )
-        weights = load(policy["weights_json"])
+        experiment = self.db.one(
+            "SELECT * FROM experiments WHERE status IN ('planned','running') "
+            "ORDER BY created_at DESC LIMIT 1"
+        )
+        treatment_policy = (
+            self.db.one(
+                "SELECT * FROM strategy_policies WHERE id=?",
+                (experiment["treatment_policy_id"],),
+            )
+            if experiment
+            else None
+        )
+        control_policy = (
+            self.db.one(
+                "SELECT * FROM strategy_policies WHERE id=?",
+                (experiment["control_policy_id"],),
+            )
+            if experiment
+            else policy
+        )
         for source_index, item in enumerate(items):
             segments = self.db.all(
                 "SELECT * FROM transcript_segments WHERE source_item_id=? ORDER BY start_ms",
@@ -537,16 +804,34 @@ class Pipeline:
             ):
                 similarity = max(0.0, cosine(load(segment["embedding_json"]), query_vector))
                 saturation = 0.15 if pass_name == "independently_interesting" else 0.25
+                assignment_key = (
+                    f"{experiment['id']}:{item['id']}:{segment['start_ms']}:{pass_name}"
+                    if experiment
+                    else ""
+                )
+                bucket = (
+                    int(hashlib.sha256(assignment_key.encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
+                    if experiment
+                    else 1.0
+                )
+                arm = (
+                    "treatment"
+                    if experiment and bucket < float(experiment["allocation"])
+                    else "control"
+                )
+                applied_policy = treatment_policy if arm == "treatment" else control_policy
+                weights = load(applied_policy["weights_json"])
                 scores = candidate_scores(
                     segment["text"], similarity, example_count, source_index, saturation
                 )
                 predicted = weighted_score(scores, weights)
+                candidate_id = uid()
                 self.db.execute(
                     "INSERT OR IGNORE INTO candidate_moments(id,campaign_id,source_item_id,start_ms,end_ms,transcript,"
                     "discovery_pass,research_match_json,evidence_ids_json,scores_json,selection_reason,saturation_json,"
                     "predicted_score,policy_id,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
-                        uid(),
+                        candidate_id,
                         campaign_id,
                         item["id"],
                         segment["start_ms"],
@@ -559,10 +844,39 @@ class Pipeline:
                         f"{pass_name.replace('_', ' ').title()} from approved source; strong hook and evidence alignment.",
                         dump({"score": saturation, "method": "fixture topic-frequency proxy"}),
                         predicted,
-                        policy["id"],
+                        applied_policy["id"],
                         "discovered",
                     ),
                 )
+                stored_candidate = self.db.one(
+                    "SELECT id FROM candidate_moments WHERE campaign_id=? AND source_item_id=? "
+                    "AND start_ms=? AND end_ms=? AND discovery_pass=?",
+                    (
+                        campaign_id,
+                        item["id"],
+                        segment["start_ms"],
+                        segment["end_ms"],
+                        pass_name,
+                    ),
+                )
+                if experiment and stored_candidate:
+                    self.db.execute(
+                        "INSERT OR IGNORE INTO experiment_assignments(id,experiment_id,candidate_id,arm,policy_id,assigned_at) "
+                        "VALUES (?,?,?,?,?,?)",
+                        (
+                            uid(),
+                            experiment["id"],
+                            stored_candidate["id"],
+                            arm,
+                            applied_policy["id"],
+                            now(),
+                        ),
+                    )
+        if experiment:
+            self.db.execute(
+                "UPDATE experiments SET status='running' WHERE id=? AND status='planned'",
+                (experiment["id"],),
+            )
         count = self.db.one(
             "SELECT COUNT(*) AS n FROM candidate_moments WHERE campaign_id=?", (campaign_id,)
         )["n"]
@@ -612,8 +926,15 @@ class Pipeline:
                 rendered += 1
                 continue
             variant_id = uid()
+            source_item = self.db.one(
+                "SELECT * FROM source_items WHERE id=? AND campaign_id=?",
+                (candidate["source_item_id"], campaign_id),
+            )
+            source_metadata = load(source_item["metadata_json"], {})
             spec = {
                 "source_item_id": candidate["source_item_id"],
+                "source_asset_uri": source_metadata.get("asset_uri"),
+                "source_probe": source_metadata.get("probe", {}),
                 "start_ms": candidate["start_ms"],
                 "end_ms": candidate["end_ms"],
                 "duration_ms": candidate["end_ms"] - candidate["start_ms"],
@@ -635,7 +956,11 @@ class Pipeline:
                 "metadata": {"campaign_id": campaign_id},
             }
             result = self.providers.renderer.render(campaign_id, variant_id, spec)
-            spec["render"] = {"renderer": result.renderer, "sha256": result.sha256}
+            spec["render"] = {
+                "renderer": result.renderer,
+                "sha256": result.sha256,
+                "probe": result.probe,
+            }
             self.db.execute(
                 "INSERT INTO clip_variants(id,candidate_id,parent_id,style_profile_id,version,render_spec_json,file_uri,"
                 "qa_status,deterministic_qa_json,ai_qa_json,predicted_score,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -674,14 +999,7 @@ class Pipeline:
             spec = load(variant["render_spec_json"])
             report = deterministic_qa(spec, requirements, approved_items)
             ai_requirements = [r for r in requirements if r["requirement_type"] == "ai_evaluated"]
-            ai_report = {
-                "label": "ai_evaluated",
-                "advisory_only": True,
-                "checks": [
-                    {"key": row["key"], "result": "uncertain_fixture", "confidence": 0.35}
-                    for row in ai_requirements
-                ],
-            }
+            ai_report = self.providers.ai.evaluate_soft_requirements(spec, ai_requirements)
             status = "passed" if report["passed"] else "failed"
             self.db.execute(
                 "UPDATE clip_variants SET qa_status=?,deterministic_qa_json=?,ai_qa_json=? WHERE id=?",

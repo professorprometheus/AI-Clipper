@@ -30,9 +30,15 @@ Or run the separated API/worker stack with `docker compose up --build`.
 
 The tests render synthetic clips with bundled FFmpeg and demonstrate campaign → durable processing → multiple sources → example/style analysis → social evidence → candidate ranking → rendering/QA → notification/review/edit → approval → idempotent export → performance/feedback → Research Ledger.
 
+Run deployment diagnostics before operating a fresh environment:
+
+```powershell
+.\.venv\Scripts\python.exe -m alpha.ops doctor
+```
+
 ## Provider modes and external access
 
-`ALPHA_PROVIDER_MODE=fixture` is the runnable CI/demo path. It does not download third-party media or imply live platform access. Set any other value to use the manual/import source fallback, which marks items as requiring authorised metadata/transcript import. Provider interfaces are in `alpha/providers.py` for source resolution/transcription, research, storage, email, rendering, and publication.
+`ALPHA_PROVIDER_MODE=fixture` is the runnable CI/demo path. It does not download third-party media or imply live platform access. In manual mode, create a draft campaign and import a local video plus exact timestamped transcript through the campaign form or `/api/campaigns/{id}/sources/import`; an explicit rights attestation is required. Research observations can be imported through `/api/campaigns/{id}/research/import`. Raw imports, provenance and derived analysis remain separate. Provider interfaces are in `alpha/providers.py` for source resolution/transcription, research, AI-assisted interpretation, storage, email, rendering, and publication.
 
 Live integrations are intentionally **not claimed complete**:
 
@@ -53,19 +59,28 @@ Copy `.env.example` values into the process environment. Important settings:
 - `ALPHA_PROVIDER_MODE`: `fixture` or manual/import fallback.
 - `ALPHA_API_TOKEN`: optional API token required through `X-Alpha-Token` when configured.
 - `ALPHA_LEASE_SECONDS`: worker lease duration; expired leases are recoverable.
+- `ALPHA_RETRY_BASE_SECONDS` / `ALPHA_MAX_JOB_ATTEMPTS`: persisted retry policy.
+- `ALPHA_REQUIRE_AUTH`: require browser sessions and protected API access.
+- `ALPHA_ADMIN_EMAIL` / `ALPHA_ADMIN_PASSWORD`: required when auth is enabled.
+- `ALPHA_SESSION_HOURS`: session lifetime.
+- `ALPHA_COOKIE_SECURE`: set `true` whenever the site is served over HTTPS.
 
 Secrets must be supplied through environment/deployment secret management and must never be committed or logged.
 
+When authentication is enabled, the UI uses a hashed, expiring server-side session, an HttpOnly SameSite cookie and CSRF protection for unsafe methods. Startup fails closed if administrator credentials are missing. This is a single-admin V0 boundary, not a substitute for a production multi-user identity provider.
+
 ## Durable processing model
 
-Each worker acquisition leases exactly one stage. The output and completed-stage checkpoint are committed before the next stage is queued. A killed worker's lease expires and another worker resumes the same stage; completed side effects are protected by stable uniqueness/idempotency keys. Logical jobs can therefore span many worker executions and do not assume one process lives for 72 hours.
+Each worker acquisition leases exactly one stage and actively renews that lease while the stage runs. The output and completed-stage checkpoint are committed before the next stage is queued. A killed worker's lease expires and another worker resumes the same stage; stale workers cannot commit after losing their token. Retry availability, exponential backoff and every attempt are persisted, while completed side effects are protected by stable uniqueness/idempotency keys. Logical jobs can therefore span many worker executions and do not assume one process lives for 72 hours.
 
 ## Approval and compliance invariants
 
 - Only `SourceItem` records descended from the campaign's `ApprovedSource` set can become candidates.
 - Deterministic and AI-evaluated QA are stored separately.
 - A mandatory deterministic failure blocks approval and publication.
+- Audited requirement revisions preserve the old value and trigger QA re-evaluation; invalidated approvals are revoked.
 - Publication requires a persisted approval record and an idempotency key.
+- Publication must use an enabled connected account selected by that campaign.
 - Change requests create child variants; parent renders and review history remain intact.
 - Prediction scores and the strategy policy version are recorded before outcomes.
 
@@ -96,4 +111,3 @@ Retention cleanup is dry-run by default and only targets generated `.ppm`/manife
 - `migrations/`: additive SQLite schema.
 - `web/`: responsive review dashboard.
 - `tests/`: unit, API, durability, invariant, and end-to-end coverage.
-

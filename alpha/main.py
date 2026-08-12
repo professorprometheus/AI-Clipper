@@ -1,24 +1,32 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
+import secrets
 import time
 from collections import defaultdict, deque
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
 
 from .config import Settings
-from .db import Database, load
+from .db import Database, load, now, uid
 from .pipeline import Pipeline
 from .schemas import (
     CampaignCreate,
+    ConnectedAccountCreate,
     ExperimentInput,
     FeedbackInput,
+    LoginInput,
     PerformanceInput,
     PublishInput,
+    RequirementUpdate,
+    ResearchImportBatch,
     ReviewInput,
 )
 from .services import AlphaService
@@ -26,6 +34,8 @@ from .services import AlphaService
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
+    if settings.require_auth and not (settings.admin_email and settings.admin_password):
+        raise RuntimeError("ALPHA_REQUIRE_AUTH needs ALPHA_ADMIN_EMAIL and ALPHA_ADMIN_PASSWORD")
     db = Database(settings.database_path, settings.migrations_path)
     pipeline = Pipeline(db, settings)
     service = AlphaService(db, pipeline)
@@ -36,20 +46,59 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api.state.service = service
     requests_by_ip: dict[str, deque[float]] = defaultdict(deque)
 
+    def token_hash(value: str) -> str:
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
     @api.middleware("http")
     async def security_and_rate_limit(request: Request, call_next):
         if request.url.path.startswith("/api/") and request.url.path != "/api/health":
             configured_token = os.getenv("ALPHA_API_TOKEN")
-            if configured_token and request.headers.get("x-alpha-token") != configured_token:
-                raise HTTPException(status_code=401, detail="invalid or missing API token")
             address = request.client.host if request.client else "unknown"
             bucket = requests_by_ip[address]
             cutoff = time.monotonic() - 60
             while bucket and bucket[0] < cutoff:
                 bucket.popleft()
             if len(bucket) >= 180:
-                raise HTTPException(status_code=429, detail="rate limit exceeded")
+                return JSONResponse(status_code=429, content={"detail": "rate limit exceeded"})
             bucket.append(time.monotonic())
+            supplied_token = request.headers.get("x-alpha-token", "")
+            token_authenticated = bool(
+                configured_token
+                and supplied_token
+                and hmac.compare_digest(supplied_token, configured_token)
+            )
+            if configured_token and not settings.require_auth and not token_authenticated:
+                return JSONResponse(
+                    status_code=401, content={"detail": "invalid or missing API token"}
+                )
+            public_auth_paths = {"/api/auth/login", "/api/auth/session"}
+            if (
+                settings.require_auth
+                and not token_authenticated
+                and request.url.path not in public_auth_paths
+            ):
+                session_token = request.cookies.get("alpha_session", "")
+                session = (
+                    db.one(
+                        "SELECT * FROM app_sessions WHERE session_hash=? AND revoked_at IS NULL AND expires_at>?",
+                        (token_hash(session_token), now()),
+                    )
+                    if session_token
+                    else None
+                )
+                if not session:
+                    return JSONResponse(
+                        status_code=401, content={"detail": "authentication required"}
+                    )
+                if request.method not in {"GET", "HEAD", "OPTIONS"}:
+                    csrf = request.headers.get("x-alpha-csrf", "")
+                    if not csrf or not hmac.compare_digest(token_hash(csrf), session["csrf_hash"]):
+                        return JSONResponse(
+                            status_code=403, content={"detail": "valid CSRF token required"}
+                        )
+                db.execute(
+                    "UPDATE app_sessions SET last_seen_at=? WHERE id=?", (now(), session["id"])
+                )
         return await call_next(request)
 
     @api.exception_handler(KeyError)
@@ -69,6 +118,84 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         migration = db.one("SELECT COUNT(*) AS n FROM schema_migrations")
         return {"status": "ok", "version": "0.1.0", "database": "ok", "migrations": migration["n"]}
 
+    @api.get("/api/auth/session")
+    def auth_session(request: Request):
+        if not settings.require_auth:
+            return {"required": False, "authenticated": True, "email": None}
+        session_token = request.cookies.get("alpha_session", "")
+        session = (
+            db.one(
+                "SELECT email,expires_at FROM app_sessions "
+                "WHERE session_hash=? AND revoked_at IS NULL AND expires_at>?",
+                (token_hash(session_token), now()),
+            )
+            if session_token
+            else None
+        )
+        return {
+            "required": True,
+            "authenticated": bool(session),
+            "email": session["email"] if session else None,
+            "expires_at": session["expires_at"] if session else None,
+        }
+
+    @api.post("/api/auth/login")
+    def login(payload: LoginInput):
+        email_valid = hmac.compare_digest(str(payload.email).lower(), settings.admin_email.lower())
+        password_valid = hmac.compare_digest(payload.password, settings.admin_password)
+        if not settings.require_auth or not (email_valid and password_valid):
+            return JSONResponse(status_code=401, content={"detail": "invalid credentials"})
+        session_token = secrets.token_urlsafe(32)
+        csrf_token = secrets.token_urlsafe(32)
+        timestamp = now()
+        expires = (datetime.now(UTC) + timedelta(hours=max(1, settings.session_hours))).isoformat()
+        db.execute(
+            "INSERT INTO app_sessions(id,session_hash,csrf_hash,email,expires_at,created_at,last_seen_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                uid(),
+                token_hash(session_token),
+                token_hash(csrf_token),
+                settings.admin_email,
+                expires,
+                timestamp,
+                timestamp,
+            ),
+        )
+        response = JSONResponse(
+            {"authenticated": True, "email": settings.admin_email, "expires_at": expires}
+        )
+        response.set_cookie(
+            "alpha_session",
+            session_token,
+            httponly=True,
+            secure=settings.cookie_secure,
+            samesite="strict",
+            max_age=max(1, settings.session_hours) * 3600,
+        )
+        response.set_cookie(
+            "alpha_csrf",
+            csrf_token,
+            httponly=False,
+            secure=settings.cookie_secure,
+            samesite="strict",
+            max_age=max(1, settings.session_hours) * 3600,
+        )
+        return response
+
+    @api.post("/api/auth/logout")
+    def logout(request: Request):
+        session_token = request.cookies.get("alpha_session", "")
+        if session_token:
+            db.execute(
+                "UPDATE app_sessions SET revoked_at=? WHERE session_hash=? AND revoked_at IS NULL",
+                (now(), token_hash(session_token)),
+            )
+        response = JSONResponse({"authenticated": False})
+        response.delete_cookie("alpha_session")
+        response.delete_cookie("alpha_csrf")
+        return response
+
     @api.post("/api/campaigns", status_code=201)
     def create_campaign(payload: CampaignCreate):
         try:
@@ -80,6 +207,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def list_campaigns():
         return service.list_campaigns()
 
+    @api.post("/api/connected-accounts", status_code=201)
+    def create_connected_account(payload: ConnectedAccountCreate):
+        return service.create_connected_account(payload)
+
+    @api.get("/api/connected-accounts")
+    def list_connected_accounts():
+        return db.all("SELECT * FROM connected_accounts ORDER BY created_at")
+
+    @api.post("/api/campaigns/{campaign_id}/accounts/{account_id}")
+    def attach_connected_account(campaign_id: str, account_id: str):
+        return service.attach_connected_account(campaign_id, account_id)
+
     @api.get("/api/campaigns/{campaign_id}")
     def get_campaign(campaign_id: str):
         return service.get_campaign(campaign_id)
@@ -87,6 +226,47 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @api.patch("/api/campaigns/{campaign_id}")
     def edit_campaign(campaign_id: str, changes: dict[str, Any]):
         return service.edit_campaign(campaign_id, changes)
+
+    @api.patch("/api/campaigns/{campaign_id}/requirements/{requirement_id}")
+    def revise_requirement(campaign_id: str, requirement_id: str, payload: RequirementUpdate):
+        return service.revise_requirement(campaign_id, requirement_id, payload)
+
+    @api.post("/api/campaigns/{campaign_id}/sources/import", status_code=201)
+    async def import_authorised_source(
+        campaign_id: str,
+        media: UploadFile = File(...),
+        transcript_json: str = Form(...),
+        rights_attestation: str = Form(...),
+        title: str | None = Form(default=None),
+    ):
+        try:
+            content = await media.read()
+            return service.import_authorised_source(
+                campaign_id,
+                media.filename or "source.mp4",
+                media.content_type or "application/octet-stream",
+                content,
+                transcript_json,
+                rights_attestation,
+                title,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @api.get("/api/campaigns/{campaign_id}/search")
+    def semantic_search(
+        campaign_id: str,
+        q: str = Query(min_length=1, max_length=500),
+        limit: int = Query(default=10, ge=1, le=100),
+    ):
+        return service.semantic_search(campaign_id, q, limit)
+
+    @api.post("/api/campaigns/{campaign_id}/research/import", status_code=201)
+    def import_research(campaign_id: str, payload: ResearchImportBatch):
+        try:
+            return service.import_research(campaign_id, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @api.post("/api/campaigns/{campaign_id}/submit", status_code=202)
     def submit_campaign(campaign_id: str):
@@ -154,7 +334,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         for row in clusters:
             row["metrics"] = load(row.pop("metrics_json"), {})
             row["evidence_ids"] = load(row.pop("evidence_ids_json"), [])
-        return {"observations": observations, "clusters": clusters}
+        creators = db.all("SELECT * FROM creator_profiles WHERE campaign_id=?", (campaign_id,))
+        for row in creators:
+            row["metrics"] = load(row.pop("metrics_json"), {})
+            row["evidence_ids"] = load(row.pop("evidence_ids_json"), [])
+        queries = db.all(
+            "SELECT id,target_type,value FROM research_targets "
+            "WHERE campaign_id=? AND target_type='generated_query' ORDER BY value",
+            (campaign_id,),
+        )
+        return {
+            "observations": observations,
+            "clusters": clusters,
+            "creator_profiles": creators,
+            "generated_queries": queries,
+        }
 
     @api.get("/api/research-ledger")
     def research_ledger():

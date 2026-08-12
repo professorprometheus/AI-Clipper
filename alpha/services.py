@@ -1,19 +1,25 @@
 from __future__ import annotations
 
 import binascii
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
 from .db import Database, dump, load, now, uid
-from .domain import apply_changes, deterministic_qa, parse_edit_instruction
+from .domain import apply_changes, cosine, deterministic_qa, embedding
 from .pipeline import Pipeline
 from .providers import canonical_url, decode_upload, stable_id
 from .schemas import (
     CampaignCreate,
+    ConnectedAccountCreate,
     ExperimentInput,
     FeedbackInput,
+    ImportedTranscriptSegment,
     PerformanceInput,
     PublishInput,
+    RequirementUpdate,
+    ResearchImportBatch,
     ReviewInput,
 )
 
@@ -24,6 +30,9 @@ class AlphaService:
         self.pipeline = pipeline
 
     def create_campaign(self, payload: CampaignCreate) -> dict[str, Any]:
+        for account_id in payload.target_account_ids:
+            if not self.db.one("SELECT id FROM connected_accounts WHERE id=?", (account_id,)):
+                raise ValueError(f"connected account not found: {account_id}")
         campaign_id = uid()
         timestamp = now()
         watermark: dict[str, Any] | None = None
@@ -103,6 +112,11 @@ class AlphaService:
                 "INSERT OR IGNORE INTO research_targets(id,campaign_id,target_type,value) VALUES (?,?,?,?)",
                 (uid(), campaign_id, "keyword", seed),
             )
+        for account_id in payload.target_account_ids:
+            self.db.execute(
+                "INSERT OR IGNORE INTO campaign_accounts(campaign_id,account_id,created_at) VALUES (?,?,?)",
+                (campaign_id, account_id, timestamp),
+            )
         self.db.audit(
             "campaign",
             campaign_id,
@@ -135,6 +149,125 @@ class AlphaService:
         )
         return requirement_id
 
+    def import_authorised_source(
+        self,
+        campaign_id: str,
+        filename: str,
+        content_type: str,
+        content: bytes,
+        transcript_json: str,
+        rights_attestation: str,
+        title: str | None = None,
+    ) -> dict[str, Any]:
+        campaign = self.db.one("SELECT * FROM campaigns WHERE id=?", (campaign_id,))
+        if not campaign:
+            raise KeyError("campaign not found")
+        if campaign["status"] != "draft":
+            raise PermissionError("sources can only be imported before campaign submission")
+        if len(rights_attestation.strip()) < 12:
+            raise ValueError("a clear source-rights attestation is required")
+        if not content or len(content) > 500_000_000:
+            raise ValueError("source media must be between 1 byte and 500 MB")
+        suffix = Path(filename).suffix.lower()
+        allowed = {
+            ".mp4": "video/mp4",
+            ".mov": "video/quicktime",
+            ".mkv": "video/x-matroska",
+            ".webm": "video/webm",
+        }
+        if suffix not in allowed:
+            raise ValueError("unsupported source media format")
+        try:
+            raw_segments = json.loads(transcript_json)
+            segments = [
+                ImportedTranscriptSegment.model_validate(segment).model_dump()
+                for segment in raw_segments
+            ]
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "transcript_json must be a valid list of timestamped segments"
+            ) from exc
+        if not segments:
+            raise ValueError("at least one timestamped transcript segment is required")
+        segments.sort(key=lambda segment: segment["start_ms"])
+        if any(
+            current["start_ms"] < previous["end_ms"]
+            for previous, current in zip(segments, segments[1:], strict=False)
+        ):
+            raise ValueError("transcript segments must not overlap")
+
+        media_sha256 = hashlib.sha256(content).hexdigest()
+        duplicate = self.db.one(
+            "SELECT i.id FROM source_imports i JOIN approved_sources s ON s.id=i.approved_source_id "
+            "WHERE s.campaign_id=? AND i.media_sha256=?",
+            (campaign_id, media_sha256),
+        )
+        if duplicate:
+            raise ValueError("this source media has already been imported into the campaign")
+
+        approved_source_id = uid()
+        storage_key = f"sources/{campaign_id}/{approved_source_id}{suffix}"
+        media_uri = self.pipeline.providers.storage.put_bytes(storage_key, content)
+        probe = self.pipeline.providers.renderer.probe_media(Path(media_uri))
+        if not probe["valid"]:
+            raise ValueError("uploaded source is not a readable video")
+        if segments[-1]["end_ms"] > probe["duration_ms"] + 500:
+            raise ValueError("transcript timestamps exceed the uploaded media duration")
+
+        timestamp = now()
+        source_url = f"alpha://authorised-upload/{approved_source_id}"
+        metadata = {
+            "provider": "authorised_upload",
+            "media_sha256": media_sha256,
+            "probe": probe,
+            "rights_attested": True,
+        }
+        with self.db.transaction() as connection:
+            connection.execute(
+                "INSERT INTO approved_sources(id,campaign_id,source_type,url,canonical_url,title,status,metadata_json,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    approved_source_id,
+                    campaign_id,
+                    "uploaded",
+                    source_url,
+                    source_url,
+                    title or Path(filename).stem,
+                    "pending",
+                    dump(metadata),
+                    timestamp,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO source_imports(id,approved_source_id,media_uri,media_sha256,original_filename,"
+                "content_type,transcript_json,rights_attestation,rights_attested_at,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    uid(),
+                    approved_source_id,
+                    media_uri,
+                    media_sha256,
+                    Path(filename).name,
+                    content_type or allowed[suffix],
+                    dump(segments),
+                    rights_attestation.strip(),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        self.db.audit(
+            "approved_source",
+            approved_source_id,
+            "authorised_media_imported",
+            {
+                "campaign_id": campaign_id,
+                "media_sha256": media_sha256,
+                "segment_count": len(segments),
+                "rights_attested": True,
+            },
+        )
+        return self.db.one("SELECT * FROM approved_sources WHERE id=?", (approved_source_id,)) or {}
+
     def get_campaign(self, campaign_id: str) -> dict[str, Any]:
         campaign = self.db.one("SELECT * FROM campaigns WHERE id=?", (campaign_id,))
         if not campaign:
@@ -156,11 +289,232 @@ class AlphaService:
         for requirement in requirements:
             requirement["value"] = load(requirement.pop("value_json"))
         campaign["requirements"] = requirements
+        campaign["target_accounts"] = self.db.all(
+            "SELECT a.* FROM connected_accounts a JOIN campaign_accounts ca ON ca.account_id=a.id "
+            "WHERE ca.campaign_id=? ORDER BY a.created_at",
+            (campaign_id,),
+        )
         campaign["job"] = self.db.one(
             "SELECT * FROM pipeline_jobs WHERE campaign_id=? ORDER BY created_at DESC LIMIT 1",
             (campaign_id,),
         )
         return campaign
+
+    def create_connected_account(self, payload: ConnectedAccountCreate) -> dict[str, Any]:
+        account_id = uid()
+        self.db.execute(
+            "INSERT INTO connected_accounts(id,platform,display_name,adapter,created_at) "
+            "VALUES (?,?,?,?,?)",
+            (
+                account_id,
+                payload.platform,
+                payload.display_name,
+                payload.adapter,
+                now(),
+            ),
+        )
+        self.db.audit(
+            "connected_account",
+            account_id,
+            "created",
+            {"platform": payload.platform, "adapter": payload.adapter},
+        )
+        return self.db.one("SELECT * FROM connected_accounts WHERE id=?", (account_id,)) or {}
+
+    def attach_connected_account(self, campaign_id: str, account_id: str) -> dict[str, Any]:
+        if not self.db.one("SELECT id FROM campaigns WHERE id=?", (campaign_id,)):
+            raise KeyError("campaign not found")
+        account = self.db.one("SELECT * FROM connected_accounts WHERE id=?", (account_id,))
+        if not account:
+            raise KeyError("connected account not found")
+        self.db.execute(
+            "INSERT OR IGNORE INTO campaign_accounts(campaign_id,account_id,created_at) VALUES (?,?,?)",
+            (campaign_id, account_id, now()),
+        )
+        self.db.audit(
+            "campaign", campaign_id, "connected_account_attached", {"account_id": account_id}
+        )
+        return account
+
+    def semantic_search(
+        self, campaign_id: str, query: str, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        if not self.db.one("SELECT id FROM campaigns WHERE id=?", (campaign_id,)):
+            raise KeyError("campaign not found")
+        query_vector = embedding(query)
+        rows = self.db.all(
+            "SELECT t.*,s.campaign_id,s.approved_source_id,s.source_url,s.title AS source_title "
+            "FROM transcript_segments t JOIN source_items s ON s.id=t.source_item_id "
+            "JOIN approved_sources a ON a.id=s.approved_source_id AND a.campaign_id=s.campaign_id "
+            "WHERE s.campaign_id=?",
+            (campaign_id,),
+        )
+        results = [
+            {
+                "source_item_id": row["source_item_id"],
+                "approved_source_id": row["approved_source_id"],
+                "source_url": row["source_url"],
+                "source_title": row["source_title"],
+                "start_ms": row["start_ms"],
+                "end_ms": row["end_ms"],
+                "text": row["text"],
+                "similarity": round(cosine(load(row["embedding_json"]), query_vector), 6),
+            }
+            for row in rows
+        ]
+        return sorted(results, key=lambda row: row["similarity"], reverse=True)[:limit]
+
+    def import_research(self, campaign_id: str, payload: ResearchImportBatch) -> dict[str, Any]:
+        campaign = self.db.one("SELECT * FROM campaigns WHERE id=?", (campaign_id,))
+        if not campaign:
+            raise KeyError("campaign not found")
+        if campaign["status"] != "draft":
+            raise PermissionError("research observations must be imported before submission")
+        timestamp = now()
+        imported_ids = []
+        with self.db.transaction() as connection:
+            for observation in payload.observations:
+                observation_id = uid()
+                try:
+                    connection.execute(
+                        "INSERT INTO research_imports(id,campaign_id,platform,url,creator,published_hours_ago,"
+                        "metrics_json,baseline_json,transcript,labels_json,raw_json,provenance,imported_at) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            observation_id,
+                            campaign_id,
+                            observation.platform,
+                            str(observation.url),
+                            observation.creator,
+                            observation.published_hours_ago,
+                            dump(observation.metrics),
+                            dump(observation.creator_baseline),
+                            observation.transcript,
+                            dump(observation.labels),
+                            dump(observation.raw),
+                            payload.provenance,
+                            timestamp,
+                        ),
+                    )
+                except Exception as exc:
+                    if "UNIQUE" in str(exc).upper():
+                        raise ValueError("duplicate research observation URL") from exc
+                    raise
+                imported_ids.append(observation_id)
+        self.db.audit(
+            "campaign",
+            campaign_id,
+            "research_imported",
+            {
+                "observation_ids": imported_ids,
+                "count": len(imported_ids),
+                "provenance": payload.provenance,
+            },
+        )
+        return {"campaign_id": campaign_id, "imported": len(imported_ids), "ids": imported_ids}
+
+    def revise_requirement(
+        self, campaign_id: str, requirement_id: str, payload: RequirementUpdate
+    ) -> dict[str, Any]:
+        requirement = self.db.one(
+            "SELECT * FROM campaign_requirements WHERE id=? AND campaign_id=?",
+            (requirement_id, campaign_id),
+        )
+        if not requirement:
+            raise KeyError("campaign requirement not found")
+        previous = {
+            "key": requirement["key"],
+            "type": requirement["requirement_type"],
+            "operator": requirement["operator"],
+            "value": load(requirement["value_json"]),
+            "severity": requirement["severity"],
+            "source_text": requirement["source_text"],
+        }
+        replacement = {
+            **previous,
+            "operator": payload.operator or previous["operator"],
+            "value": payload.value,
+            "severity": payload.severity or previous["severity"],
+            "source_text": payload.source_text
+            if payload.source_text is not None
+            else previous["source_text"],
+        }
+        timestamp = now()
+        with self.db.transaction() as connection:
+            connection.execute(
+                "INSERT INTO requirement_revisions(id,requirement_id,campaign_id,previous_json,replacement_json,reason,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (
+                    uid(),
+                    requirement_id,
+                    campaign_id,
+                    dump(previous),
+                    dump(replacement),
+                    payload.reason,
+                    timestamp,
+                ),
+            )
+            connection.execute(
+                "UPDATE campaign_requirements SET operator=?,value_json=?,severity=?,source_text=? WHERE id=?",
+                (
+                    replacement["operator"],
+                    dump(replacement["value"]),
+                    replacement["severity"],
+                    replacement["source_text"],
+                    requirement_id,
+                ),
+            )
+        qa_summary = self._reevaluate_campaign_qa(campaign_id)
+        self.db.audit(
+            "campaign_requirement",
+            requirement_id,
+            "revised",
+            {
+                "campaign_id": campaign_id,
+                "previous": previous,
+                "replacement": replacement,
+                "reason": payload.reason,
+                "qa_summary": qa_summary,
+            },
+        )
+        return {
+            "requirement_id": requirement_id,
+            "previous": previous,
+            "replacement": replacement,
+            "qa_summary": qa_summary,
+        }
+
+    def _reevaluate_campaign_qa(self, campaign_id: str) -> dict[str, int]:
+        requirements = self.pipeline._requirements(campaign_id)
+        approved_items = {
+            row["id"]
+            for row in self.db.all(
+                "SELECT id FROM source_items WHERE campaign_id=?", (campaign_id,)
+            )
+        }
+        variants = self.db.all(
+            "SELECT v.* FROM clip_variants v JOIN candidate_moments c ON c.id=v.candidate_id "
+            "WHERE c.campaign_id=?",
+            (campaign_id,),
+        )
+        passed = 0
+        revoked = 0
+        for variant in variants:
+            report = deterministic_qa(
+                load(variant["render_spec_json"]), requirements, approved_items
+            )
+            status = "passed" if report["passed"] else "failed"
+            self.db.execute(
+                "UPDATE clip_variants SET qa_status=?,deterministic_qa_json=? WHERE id=?",
+                (status, dump(report), variant["id"]),
+            )
+            passed += int(report["passed"])
+            if not report["passed"]:
+                revoked += self.db.execute(
+                    "UPDATE approvals SET revoked_at=? WHERE clip_variant_id=? AND revoked_at IS NULL",
+                    (now(), variant["id"]),
+                )
+        return {"variants": len(variants), "passed": passed, "revoked_approvals": revoked}
 
     def list_campaigns(self) -> list[dict[str, Any]]:
         return self.db.all(
@@ -268,7 +622,7 @@ class AlphaService:
         self, parent: dict[str, Any], review_id: str, instruction: str
     ) -> dict[str, Any]:
         current = load(parent["render_spec_json"])
-        changes = parse_edit_instruction(instruction, current)
+        changes = self.pipeline.providers.ai.interpret_edit_request(instruction, current)
         spec = apply_changes(current, changes)
         candidate = self.db.one(
             "SELECT * FROM candidate_moments WHERE id=?", (parent["candidate_id"],)
@@ -282,7 +636,11 @@ class AlphaService:
         )
         child_id = uid()
         render = self.pipeline.providers.renderer.render(candidate["campaign_id"], child_id, spec)
-        spec["render"] = {"renderer": render.renderer, "sha256": render.sha256}
+        spec["render"] = {
+            "renderer": render.renderer,
+            "sha256": render.sha256,
+            "probe": render.probe,
+        }
         requirements = self.pipeline._requirements(candidate["campaign_id"])
         approved_items = {
             row["id"]
@@ -339,6 +697,16 @@ class AlphaService:
         )
         if not approved:
             raise PermissionError("publication source is not approved for campaign")
+        if payload.account_id:
+            account = self.db.one(
+                "SELECT a.* FROM connected_accounts a JOIN campaign_accounts ca ON ca.account_id=a.id "
+                "WHERE a.id=? AND ca.campaign_id=?",
+                (payload.account_id, row["campaign_id"]),
+            )
+            if not account:
+                raise PermissionError("publication account is not selected for this campaign")
+            if account["adapter"] != "manual_export":
+                raise PermissionError("the selected account has no enabled publication adapter")
         key = f"publication:{variant_id}:{payload.platform}:{payload.account_id or 'manual'}"
         existing = self.db.one("SELECT * FROM publications WHERE idempotency_key=?", (key,))
         if existing:
@@ -441,7 +809,42 @@ class AlphaService:
                         "market_positive": market_good,
                     }
                 )
-        return {"records": rows, "preference_market_disagreements": disagreements}
+        revenue_rows = self.db.all(
+            "SELECT ps.revenue_json FROM performance_snapshots ps "
+            "JOIN publications p ON p.id=ps.publication_id "
+            "JOIN clip_variants v ON v.id=p.clip_variant_id "
+            "JOIN candidate_moments m ON m.id=v.candidate_id WHERE m.campaign_id=?",
+            (campaign_id,),
+        )
+        total_revenue = sum(
+            float(load(row["revenue_json"], {}).get("revenue", 0) or 0) for row in revenue_rows
+        )
+        published_clips = self.db.one(
+            "SELECT COUNT(DISTINCT p.clip_variant_id) AS n FROM publications p "
+            "JOIN clip_variants v ON v.id=p.clip_variant_id "
+            "JOIN candidate_moments m ON m.id=v.candidate_id WHERE m.campaign_id=?",
+            (campaign_id,),
+        )["n"]
+        human_minutes = self.db.one(
+            "SELECT COALESCE(SUM(human_minutes),0) AS n FROM feedback WHERE campaign_id=?",
+            (campaign_id,),
+        )["n"]
+        summary = {
+            "total_revenue": round(total_revenue, 2),
+            "published_clips": published_clips,
+            "human_minutes": human_minutes,
+            "revenue_per_clip": round(total_revenue / published_clips, 2)
+            if published_clips
+            else None,
+            "revenue_per_human_hour": round(total_revenue / (human_minutes / 60), 2)
+            if human_minutes
+            else None,
+        }
+        return {
+            "records": rows,
+            "preference_market_disagreements": disagreements,
+            "summary": summary,
+        }
 
     def create_experiment(self, payload: ExperimentInput) -> dict[str, Any]:
         active = self.db.one(
@@ -497,7 +900,41 @@ class AlphaService:
         experiment = self.db.one("SELECT * FROM experiments WHERE id=?", (experiment_id,))
         if not experiment:
             raise KeyError("experiment not found")
-        outcome = {"summary": summary, "winner": "treatment" if activate_treatment else "control"}
+        arm_rows = self.db.all(
+            "SELECT a.arm,c.predicted_score,r.decision,ps.metrics_json,ps.revenue_json "
+            "FROM experiment_assignments a JOIN candidate_moments c ON c.id=a.candidate_id "
+            "LEFT JOIN clip_variants v ON v.candidate_id=c.id "
+            "LEFT JOIN reviews r ON r.clip_variant_id=v.id "
+            "LEFT JOIN publications p ON p.clip_variant_id=v.id "
+            "LEFT JOIN performance_snapshots ps ON ps.publication_id=p.id "
+            "WHERE a.experiment_id=?",
+            (experiment_id,),
+        )
+        metrics: dict[str, dict[str, Any]] = {}
+        for arm in ("control", "treatment"):
+            members = [row for row in arm_rows if row["arm"] == arm]
+            metrics[arm] = {
+                "assignments": len(members),
+                "average_predicted_score": round(
+                    sum(row["predicted_score"] for row in members) / len(members), 5
+                )
+                if members
+                else None,
+                "approvals": sum(row["decision"] == "approve" for row in members),
+                "views": sum(load(row["metrics_json"], {}).get("views", 0) or 0 for row in members),
+                "revenue": round(
+                    sum(
+                        float(load(row["revenue_json"], {}).get("revenue", 0) or 0)
+                        for row in members
+                    ),
+                    2,
+                ),
+            }
+        outcome = {
+            "summary": summary,
+            "winner": "treatment" if activate_treatment else "control",
+            "metrics": metrics,
+        }
         self.db.execute(
             "UPDATE experiments SET status='evaluated',outcome_json=? WHERE id=?",
             (dump(outcome), experiment_id),

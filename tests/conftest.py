@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,8 @@ def settings(tmp_path: Path) -> Settings:
         lease_seconds=2,
         migrations_path=root / "migrations",
         web_path=root / "web",
+        retry_base_seconds=0,
+        max_job_attempts=5,
     )
 
 
@@ -118,3 +121,36 @@ def campaign_payload(
             else None
         ),
     }
+
+
+def generated_source_video(path: Path, duration_seconds: int = 6) -> bytes:
+    import imageio_ffmpeg
+
+    subprocess.run(
+        [
+            imageio_ffmpeg.get_ffmpeg_exe(),
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=0x2459a7:s=640x360:r=24:d={duration_seconds}",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency=330:sample_rate=48000:duration={duration_seconds}",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-y",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=30,
+    )
+    return path.read_bytes()

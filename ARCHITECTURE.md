@@ -29,6 +29,8 @@
 - SQLite permitted for local development/tests
 - pgvector optional once semantic scale justifies it
 
+The implemented single-user V0 uses SQLite. PostgreSQL remains the required next step for multi-host workers because SQLite is not treated as a distributed queue.
+
 ### Durable jobs
 Implement a queue abstraction, not provider-specific business logic.
 
@@ -45,7 +47,9 @@ For V0:
 - database-backed queue is acceptable;
 - worker polls pending tasks;
 - every pipeline stage stores a checkpoint;
-- job lease/heartbeat prevents duplicate active workers;
+- an active heartbeat renews the lease while a stage is running;
+- lease-token guards prevent a stale worker committing after ownership changes;
+- retry availability, bounded exponential backoff and each attempt are persisted;
 - expired leases are recoverable.
 
 Do not require the browser to remain connected.
@@ -83,6 +87,8 @@ Provider abstraction:
 V0 must run with at least one local/free-capable adapter.
 Never bake one commercial model provider into domain logic.
 
+The current local adapter provides deterministic heuristic example analysis, research-query generation, advisory soft-requirement evaluation and edit interpretation. These outputs remain explicitly AI/advisory and never override deterministic compliance.
+
 ### Semantic retrieval
 V0:
 - embeddings adapter;
@@ -104,6 +110,8 @@ V0 rule:
 - require explicit approval token;
 - post only after approval.
 If direct posting API is unavailable/not permitted, provide an export/manual-post flow rather than bypassing platform controls.
+
+Campaigns select one or more enabled ConnectedAccount records. Publication must re-check that the chosen account belongs to the campaign before invoking its adapter.
 
 ## Domain model
 
@@ -307,6 +315,7 @@ STAGE 1 resolve_sources
 - expand playlists into concrete source items;
 - deduplicate;
 - fetch permitted metadata;
+- resolve rights-attested local SourceImport records without remote fetching;
 - checkpoint resolved items.
 
 STAGE 2 ingest_sources
@@ -324,6 +333,7 @@ STAGE 3 analyse_successful_examples
 STAGE 4 social_research
 - generate research plan from campaign/examples;
 - collect available/permitted observations;
+- consume audited manual ResearchImport records when a live provider is unavailable;
 - identify creator-relative outliers;
 - identify velocity and topic clusters;
 - analyse successful clipping channels where available;
@@ -416,3 +426,6 @@ A 72-hour campaign processing job is acceptable. The architecture must not assum
 - Signed/unguessable review actions.
 - Explicit approval record before publication.
 - Audit log for campaign changes, approvals and publications.
+- Single-user V0 deployments may use hashed, expiring, revocable database sessions with HttpOnly SameSite cookies and CSRF protection.
+- Authentication-required startup fails closed when administrator credentials are missing.
+- API-token comparisons are constant-time; exception text is redacted before durable storage or notification.

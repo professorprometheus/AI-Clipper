@@ -115,3 +115,71 @@ Human and market disagreement can be inspected historically, and learning change
 
 Alternatives considered:
 Mutating a single render/policy row was rejected because it destroys evaluation provenance.
+
+---
+
+### ADR-006 — Lease renewal, persisted backoff, and attempt history
+Status: Accepted
+
+Context:
+FFmpeg work can outlast the original short lease. A second worker must not acquire the same stage, while transient failures still need durable retry timing and useful history.
+
+Decision:
+Renew the stage lease from a bounded heartbeat thread while work is active. Guard completion/failure updates with the lease token, store every attempt separately, and persist exponential retry availability. A terminal failure sends one secret-redacted attention notification and moves the campaign to an explicit attention state.
+
+Consequences:
+Long stages remain mutually exclusive without requiring a long static lease. Operators can inspect retries without losing prior attempts, and a stale worker cannot commit after losing ownership.
+
+Alternatives considered:
+A lease longer than every possible render and overwriting one attempt row were rejected because they weaken recovery and erase operational evidence.
+
+---
+
+### ADR-007 — Rights-attested local imports are the real-media fallback
+Status: Accepted
+
+Context:
+ALPHA needs to process real source media and research evidence, but the repository has no permission to fetch third-party content or platform data.
+
+Decision:
+Accept local video only with an explicit rights attestation and validated timestamped transcript. Store file hashes, provenance and import audit records before pipeline use. Accept research observations through an audited manual batch and preserve the raw import separately from derived clusters and creator profiles.
+
+Consequences:
+The V0 can render genuine authorised footage and analyse non-fixture evidence without bypassing platform controls. Users remain responsible for supplying permitted material.
+
+Alternatives considered:
+Implicit URL downloading and treating copied metrics as live provider observations were rejected for compliance and provenance reasons.
+
+---
+
+### ADR-008 — Single-admin database sessions for protected V0 deployments
+Status: Accepted
+
+Context:
+The dashboard and unsafe API operations need authentication and CSRF protection, while the free single-user path should not require an external identity service.
+
+Decision:
+Provide optional local single-admin login backed by hashed, expiring, revocable database sessions. Use HttpOnly SameSite cookies plus a separate CSRF token for unsafe browser requests. Fail startup when authentication is required but credentials are absent, and retain the constant-time API-token option for non-browser clients.
+
+Consequences:
+Local development remains simple and deployments can be protected without storing plaintext session tokens. Multi-user roles, OAuth and external identity lifecycle are explicitly future production work.
+
+Alternatives considered:
+Browser-only API keys and unauthenticated production defaults were rejected because they do not provide safe session or CSRF semantics.
+
+---
+
+### ADR-009 — Experiment assignment precedes candidate scoring
+Status: Accepted
+
+Context:
+An experiment is not auditable if the treatment arm is selected after observing model scores or outcomes.
+
+Decision:
+Assign each candidate deterministically to control or treatment from stable identifiers and the configured allocation before scoring. Persist both the assignment and applied policy, then summarise predicted and observed metrics by arm.
+
+Consequences:
+Retries preserve assignments and comparisons are reproducible. Exploration remains configurable without automatic source-code changes.
+
+Alternatives considered:
+Random assignment on every run and post-score bucketing were rejected because they are unstable or biased.

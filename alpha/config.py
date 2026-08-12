@@ -16,6 +16,13 @@ class Settings:
     lease_seconds: int
     migrations_path: Path
     web_path: Path
+    retry_base_seconds: float = 1.0
+    max_job_attempts: int = 5
+    require_auth: bool = False
+    admin_email: str = ""
+    admin_password: str = ""
+    session_hours: int = 12
+    cookie_secure: bool = False
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -30,4 +37,11 @@ class Settings:
             lease_seconds=int(os.getenv("ALPHA_LEASE_SECONDS", "30")),
             migrations_path=root / "migrations",
             web_path=root / "web",
+            retry_base_seconds=float(os.getenv("ALPHA_RETRY_BASE_SECONDS", "1")),
+            max_job_attempts=int(os.getenv("ALPHA_MAX_JOB_ATTEMPTS", "5")),
+            require_auth=os.getenv("ALPHA_REQUIRE_AUTH", "false").lower() in {"1", "true", "yes"},
+            admin_email=os.getenv("ALPHA_ADMIN_EMAIL", ""),
+            admin_password=os.getenv("ALPHA_ADMIN_PASSWORD", ""),
+            session_hours=int(os.getenv("ALPHA_SESSION_HOURS", "12")),
+            cookie_secure=os.getenv("ALPHA_COOKIE_SECURE", "false").lower() in {"1", "true", "yes"},
         )

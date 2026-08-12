@@ -3,11 +3,18 @@ services:
     build: .
     ports: ["8000:8000"]
     volumes: ["alpha-data:/data"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
   worker:
     build: .
     command: ["python", "-m", "alpha.worker"]
     volumes: ["alpha-data:/data"]
     depends_on: [api]
+    restart: unless-stopped
 volumes:
   alpha-data:
-

@@ -14,6 +14,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .db import dump
+from .domain import parse_edit_instruction
 
 
 def canonical_url(url: str) -> str:
@@ -122,6 +123,88 @@ class ResearchProvider(ABC):
     def collect(self, campaign: dict[str, Any], seeds: list[str]) -> list[dict[str, Any]]: ...
 
 
+class AIAdapter(ABC):
+    @abstractmethod
+    def analyse_example(self, example: dict[str, Any], index: int) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def generate_research_queries(
+        self, campaign: dict[str, Any], seeds: list[str], examples: list[dict[str, Any]]
+    ) -> list[str]: ...
+
+    @abstractmethod
+    def evaluate_soft_requirements(
+        self, spec: dict[str, Any], requirements: list[dict[str, Any]]
+    ) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def interpret_edit_request(
+        self, instruction: str, current_spec: dict[str, Any]
+    ) -> dict[str, Any]: ...
+
+
+class LocalHeuristicAIAdapter(AIAdapter):
+    """Free deterministic development adapter; outputs remain explicitly heuristic/AI-labelled."""
+
+    def analyse_example(self, example: dict[str, Any], index: int) -> dict[str, Any]:
+        return {
+            "hook": "contrarian promise",
+            "topic": "campaign-aligned insight",
+            "subtopic": "practical proof",
+            "emotion": "surprise",
+            "controversy": 0.45,
+            "humour": 0.25,
+            "context": "minimal",
+            "structure": ["hook", "proof", "payoff"],
+            "duration_seconds": 28 + (index % 3) * 2,
+            "opening_type": "direct_claim",
+            "headline": "short_bold",
+            "caption_pattern": "medium_chunks",
+            "crop": "speaker_centered_9_16",
+            "pacing": "fast",
+            "ending": "payoff",
+            "evidence": {"example_id": example["id"], "url": example["url"]},
+            "confidence": 0.72,
+            "adapter": "local_heuristic_v1",
+        }
+
+    def generate_research_queries(
+        self, campaign: dict[str, Any], seeds: list[str], examples: list[dict[str, Any]]
+    ) -> list[str]:
+        queries = {f"{seed} viral clips" for seed in seeds} | {
+            f"{seed} emerging angles" for seed in seeds
+        }
+        queries.add(f"{campaign['name']} successful clipping accounts")
+        queries.update(
+            f"{row['creator']} successful clips on {row['platform']}"
+            for row in examples
+            if row.get("creator")
+        )
+        return sorted(queries)
+
+    def evaluate_soft_requirements(
+        self, spec: dict[str, Any], requirements: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        return {
+            "label": "ai_evaluated",
+            "adapter": "local_heuristic_v1",
+            "advisory_only": True,
+            "checks": [
+                {
+                    "key": row["key"],
+                    "result": "uncertain_heuristic",
+                    "confidence": 0.35,
+                }
+                for row in requirements
+            ],
+        }
+
+    def interpret_edit_request(
+        self, instruction: str, current_spec: dict[str, Any]
+    ) -> dict[str, Any]:
+        return parse_edit_instruction(instruction, current_spec)
+
+
 class FixtureResearchProvider(ResearchProvider):
     """Known deterministic dataset containing relative outliers and a semantic cluster."""
 
@@ -149,6 +232,13 @@ class FixtureResearchProvider(ResearchProvider):
             }
             for index, (creator, views, baseline, age_hours, angle, label) in enumerate(rows)
         ]
+
+
+class ManualResearchProvider(ResearchProvider):
+    """No-network provider; observations enter through the audited import endpoint."""
+
+    def collect(self, campaign: dict[str, Any], seeds: list[str]) -> list[dict[str, Any]]:
+        return []
 
 
 class EmailAdapter(ABC):
@@ -203,10 +293,11 @@ class RenderResult:
     file_uri: str
     renderer: str
     sha256: str
+    probe: dict[str, Any]
 
 
 class Renderer:
-    """Synthetic authorised renderer. Uses bundled/system FFmpeg, never downloads source media."""
+    """FFmpeg renderer for generated fixtures and explicitly authorised local source media."""
 
     def __init__(self, storage: LocalStorageAdapter):
         self.storage = storage
@@ -245,6 +336,39 @@ class Renderer:
         }
         return positions.get(position, positions["bottom_right"])
 
+    def probe_media(self, path: Path) -> dict[str, Any]:
+        ffmpeg = self._ffmpeg()
+        if not ffmpeg or not path.exists():
+            return {
+                "valid": False,
+                "probe_method": "unavailable",
+                "duration_ms": 0,
+                "width": 0,
+                "height": 0,
+                "has_audio": False,
+            }
+        result = subprocess.run(
+            [ffmpeg, "-hide_banner", "-i", str(path)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        details = result.stderr
+        duration_match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", details)
+        video_match = re.search(r"Video:.*?(\d{2,5})x(\d{2,5})(?:[,\s]|$)", details)
+        duration_ms = 0
+        if duration_match:
+            hours, minutes, seconds = duration_match.groups()
+            duration_ms = round((int(hours) * 3600 + int(minutes) * 60 + float(seconds)) * 1000)
+        return {
+            "valid": bool(duration_match and video_match),
+            "probe_method": "ffmpeg_stderr",
+            "duration_ms": duration_ms,
+            "width": int(video_match.group(1)) if video_match else 0,
+            "height": int(video_match.group(2)) if video_match else 0,
+            "has_audio": "Audio:" in details,
+        }
+
     def render(self, campaign_id: str, variant_id: str, spec: dict[str, Any]) -> RenderResult:
         output = self.storage._safe_path(f"renders/{campaign_id}/{variant_id}.mp4")
         ffmpeg = self._ffmpeg()
@@ -256,25 +380,64 @@ class Renderer:
                 str(output.with_suffix(".render.json")),
                 "manifest_fallback",
                 hashlib.sha256(manifest).hexdigest(),
+                {
+                    "valid": False,
+                    "probe_method": "manifest_fallback",
+                    "duration_ms": 0,
+                    "width": 0,
+                    "height": 0,
+                    "has_audio": False,
+                },
             )
-        command = [
-            ffmpeg,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            f"color=c=0x172033:s=720x1280:r=24:d={duration}",
-            "-f",
-            "lavfi",
-            "-i",
-            f"sine=frequency=440:sample_rate=48000:duration={duration}",
-        ]
+        command = [ffmpeg, "-hide_banner", "-loglevel", "error"]
+        source_asset = spec.get("source_asset_uri")
+        source_probe = spec.get("source_probe", {})
+        filters: list[str] = []
+        if source_asset and Path(source_asset).exists():
+            command += [
+                "-ss",
+                f"{max(0, int(spec['start_ms'])) / 1000:.3f}",
+                "-i",
+                str(source_asset),
+            ]
+            crop = spec.get("crop", {}).get("adjustment", "center")
+            x = "0" if crop == "left" else ("in_w-out_w" if crop == "right" else "(in_w-out_w)/2")
+            y = "0" if crop == "up" else ("in_h-out_h" if crop == "down" else "(in_h-out_h)/2")
+            filters.append(
+                "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
+                f"crop=720:1280:x={x}:y={y}[base]"
+            )
+            base_label = "base"
+            if source_probe.get("has_audio"):
+                audio_map = "0:a:0?"
+                next_input = 1
+            else:
+                command += [
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    f"anullsrc=channel_layout=stereo:sample_rate=48000:d={duration}",
+                ]
+                audio_map = "1:a"
+                next_input = 2
+            renderer_name = "ffmpeg_authorised_source"
+        else:
+            command += [
+                "-f",
+                "lavfi",
+                "-i",
+                f"color=c=0x172033:s=720x1280:r=24:d={duration}",
+                "-f",
+                "lavfi",
+                "-i",
+                f"sine=frequency=440:sample_rate=48000:duration={duration}",
+            ]
+            base_label = "0:v"
+            audio_map = "1:a"
+            next_input = 2
+            renderer_name = "ffmpeg_fixture"
         watermark = spec.get("watermark")
         captions = spec.get("captions", {})
-        base_label = "0:v"
-        filters: list[str] = []
         if captions.get("enabled"):
             caption_text = str(captions.get("text") or "ALPHA captions")[:110]
             caption_text = (
@@ -285,10 +448,24 @@ class Renderer:
                 .replace("\n", " ")
             )
             filters.append(
-                f"[0:v]drawtext=text='{caption_text}':fontcolor=white:fontsize=30:"
+                f"[{base_label}]drawtext=text='{caption_text}':fontcolor=white:fontsize=30:"
                 "box=1:boxcolor=black@0.65:boxborderw=16:x=(w-text_w)/2:y=h-220[captioned]"
             )
             base_label = "captioned"
+        headline = spec.get("headline", {})
+        if headline.get("enabled") and headline.get("text"):
+            headline_text = (
+                str(headline["text"])[:80]
+                .replace("\\", "\\\\")
+                .replace("'", "\\'")
+                .replace(":", "\\:")
+                .replace("%", "\\%")
+            )
+            filters.append(
+                f"[{base_label}]drawtext=text='{headline_text}':fontcolor=white:fontsize=46:"
+                "box=1:boxcolor=black@0.72:boxborderw=18:x=(w-text_w)/2:y=120[headlined]"
+            )
+            base_label = "headlined"
         if watermark and watermark.get("enabled", True):
             configured_asset = watermark.get("asset_uri")
             asset = Path(configured_asset) if configured_asset else None
@@ -302,7 +479,7 @@ class Renderer:
             command += ["-i", str(asset)]
             filters.extend(
                 [
-                    f"[2:v]scale={size}:-1,format=rgba,colorchannelmixer=aa={opacity}[wm]",
+                    f"[{next_input}:v]scale={size}:-1,format=rgba,colorchannelmixer=aa={opacity}[wm]",
                     f"[{base_label}][wm]overlay={x}:{y}[v]",
                 ]
             )
@@ -312,7 +489,7 @@ class Renderer:
                 "-map",
                 "[v]",
                 "-map",
-                "1:a",
+                audio_map,
             ]
         elif filters:
             filters.append(f"[{base_label}]null[v]")
@@ -322,11 +499,13 @@ class Renderer:
                 "-map",
                 "[v]",
                 "-map",
-                "1:a",
+                audio_map,
             ]
         else:
-            command += ["-map", "0:v", "-map", "1:a"]
+            command += ["-map", "0:v", "-map", audio_map]
         command += [
+            "-t",
+            f"{duration:.3f}",
             "-c:v",
             "libx264",
             "-preset",
@@ -337,6 +516,14 @@ class Renderer:
             "aac",
             "-movflags",
             "+faststart",
+            "-fflags",
+            "+bitexact",
+            "-flags:v",
+            "+bitexact",
+            "-flags:a",
+            "+bitexact",
+            "-threads",
+            "1",
             "-metadata",
             "creation_time=1970-01-01T00:00:00Z",
             "-y",
@@ -344,7 +531,8 @@ class Renderer:
         ]
         subprocess.run(command, check=True, timeout=90, capture_output=True)
         content = output.read_bytes()
-        return RenderResult(str(output), "ffmpeg", hashlib.sha256(content).hexdigest())
+        probe = self.probe_media(output)
+        return RenderResult(str(output), renderer_name, hashlib.sha256(content).hexdigest(), probe)
 
 
 def decode_upload(data_base64: str) -> bytes:

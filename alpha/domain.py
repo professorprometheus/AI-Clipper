@@ -247,6 +247,41 @@ def deterministic_qa(
             "observed": f"{spec.get('width')}x{spec.get('height')}",
         },
     ]
+    render_probe = spec.get("render", {}).get("probe")
+    if render_probe is not None:
+        expected_duration = int(spec.get("duration_ms", 0))
+        actual_duration = int(render_probe.get("duration_ms", 0))
+        checks.extend(
+            [
+                {
+                    "key": "render_media_valid",
+                    "passed": bool(render_probe.get("valid")),
+                    "mandatory": True,
+                    "observed": render_probe.get("probe_method"),
+                },
+                {
+                    "key": "rendered_resolution",
+                    "passed": render_probe.get("width") == spec.get("width")
+                    and render_probe.get("height") == spec.get("height"),
+                    "mandatory": True,
+                    "observed": f"{render_probe.get('width')}x{render_probe.get('height')}",
+                    "expected": f"{spec.get('width')}x{spec.get('height')}",
+                },
+                {
+                    "key": "rendered_duration",
+                    "passed": abs(actual_duration - expected_duration) <= 750,
+                    "mandatory": True,
+                    "observed": actual_duration,
+                    "expected": expected_duration,
+                },
+                {
+                    "key": "rendered_audio",
+                    "passed": bool(render_probe.get("has_audio")),
+                    "mandatory": bool(spec.get("audio", {}).get("normalise", True)),
+                    "observed": bool(render_probe.get("has_audio")),
+                },
+            ]
+        )
     for requirement in requirements:
         if requirement["requirement_type"] != "deterministic":
             continue
@@ -285,6 +320,7 @@ def deterministic_qa(
         checks.append(
             {
                 "key": key,
+                "requirement_id": requirement.get("id"),
                 "passed": passed,
                 "mandatory": requirement["severity"] == "mandatory",
                 "observed": observed,
