@@ -99,8 +99,10 @@ V0:
 ### Email
 Provider abstraction:
 - development console/file email adapter;
-- production SMTP/API adapter.
+- production Resend HTTPS API adapter.
 Email only after review-ready or meaningful failure requiring human intervention.
+
+The Resend adapter sends plain-text messages with a provider idempotency key and stores the returned email ID as the delivery URI. The API key stays in environment/secret management and is never persisted or included in delivery errors.
 
 ### Publishing
 One adapter per platform.

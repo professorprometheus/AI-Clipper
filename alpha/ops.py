@@ -61,6 +61,14 @@ def deployment_diagnostics(settings: Settings) -> dict:
         "credentials_configured": auth_configured,
         "secure_cookie": settings.cookie_secure,
     }
+    email_provider_valid = settings.email_provider in {"file", "resend"}
+    resend_configured = bool(settings.resend_api_key and settings.resend_from_email)
+    checks["email"] = {
+        "ok": email_provider_valid and (settings.email_provider != "resend" or resend_configured),
+        "provider": settings.email_provider,
+        "api_key_configured": bool(settings.resend_api_key),
+        "from_address_configured": bool(settings.resend_from_email),
+    }
     return {"ok": all(check["ok"] for check in checks.values()), "checks": checks}
 
 

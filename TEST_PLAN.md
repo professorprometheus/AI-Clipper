@@ -101,6 +101,8 @@ The test does not need to run for 72 wall-clock hours. It must prove the archite
 - `tests/test_auth.py`: unauthenticated denial, failed/correct login, hashed session persistence, CSRF enforcement, authenticated write, logout and fail-closed configuration.
 - `tests/test_research_import.py`: audited manual observations, AI-adapter query generation, expected relative outliers, cluster detection, creator profiles and raw/derived evidence separation.
 - `tests/test_ops.py`: deployment diagnostics cover migrations, storage round-trip, FFmpeg and authentication configuration.
+- `tests/test_email.py`: Resend payload/auth/idempotency contract, safe provider errors, automatic provider selection and fail-closed configuration.
+- `tests/test_api_e2e.py`: review-ready email contains the campaign name, expanded source count, research summary, candidate count, clip count and review URL.
 - `tests/test_domain.py`: structured edit parsing/application and strict separation of AI-evaluated requirements from deterministic QA.
 
 ## Manual UI smoke (2026-08-12)

@@ -36,6 +36,7 @@ from .providers import (
     PublicationAdapter,
     Renderer,
     ResearchProvider,
+    ResendEmailAdapter,
     SourceProvider,
 )
 
@@ -91,13 +92,23 @@ class Providers:
             if settings.provider_mode == "fixture"
             else ManualImportSourceProvider()
         )
+        if settings.email_provider == "file":
+            email: EmailAdapter = FileEmailAdapter(settings.email_sink_path)
+        elif settings.email_provider == "resend":
+            email = ResendEmailAdapter(
+                settings.resend_api_key,
+                settings.resend_from_email,
+                settings.email_timeout_seconds,
+            )
+        else:
+            raise ValueError(f"Unsupported email provider: {settings.email_provider}")
         return cls(
             storage=storage,
             source=source,
             research=FixtureResearchProvider()
             if settings.provider_mode == "fixture"
             else ManualResearchProvider(),
-            email=FileEmailAdapter(settings.email_sink_path),
+            email=email,
             publication=ManualExportAdapter(storage),
             renderer=Renderer(storage),
             ai=LocalHeuristicAIAdapter(),
@@ -1019,10 +1030,39 @@ class Pipeline:
             "SELECT COUNT(*) AS n FROM clip_variants v JOIN candidate_moments c ON c.id=v.candidate_id WHERE c.campaign_id=?",
             (campaign_id,),
         )["n"]
+        sources = self.db.one(
+            "SELECT COUNT(*) AS n FROM source_items WHERE campaign_id=?", (campaign_id,)
+        )["n"]
+        candidates = self.db.one(
+            "SELECT COUNT(*) AS n FROM candidate_moments WHERE campaign_id=?", (campaign_id,)
+        )["n"]
+        strategy = self.db.one(
+            "SELECT brief_json FROM strategy_briefs WHERE campaign_id=?", (campaign_id,)
+        )
+        strategy_brief = load(strategy["brief_json"], {}) if strategy else {}
+        opportunity_labels = [
+            row.get("label", "")
+            for row in strategy_brief.get("ranked_opportunities", [])[:3]
+            if row.get("label")
+        ]
+        research_summary = strategy_brief.get(
+            "recommendation", "Research completed; inspect the evidence in the review dashboard."
+        )
+        if opportunity_labels:
+            research_summary += f" Top opportunities: {', '.join(opportunity_labels)}."
         key = f"review-ready:{campaign_id}:{job_id}"
         existing = self.db.one("SELECT * FROM notifications WHERE idempotency_key=?", (key,))
         if not existing:
-            body = f"ALPHA has {variants} clips ready for review. Review: {self.settings.base_url}/?campaign={campaign_id}"
+            body = "\n".join(
+                [
+                    f"Campaign: {campaign['name']}",
+                    f"Sources analysed: {sources}",
+                    f"Research summary: {research_summary}",
+                    f"Candidates considered: {candidates}",
+                    f"Clips produced: {variants}",
+                    f"Review: {self.settings.base_url}/?campaign={campaign_id}",
+                ]
+            )
             uri = self.providers.email.send(
                 campaign["owner_email"], f"{campaign['name']} is ready for review", body, key
             )

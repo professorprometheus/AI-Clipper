@@ -7,13 +7,15 @@ import math
 import re
 import shutil
 import subprocess
+import urllib.error
+import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from .db import dump
+from .db import dump, load
 from .domain import parse_edit_instruction
 
 
@@ -266,6 +268,65 @@ class FileEmailAdapter(EmailAdapter):
                 encoding="utf-8",
             )
         return str(path)
+
+
+class ResendEmailAdapter(EmailAdapter):
+    endpoint = "https://api.resend.com/emails"
+
+    def __init__(
+        self,
+        api_key: str,
+        from_email: str,
+        timeout_seconds: float = 10.0,
+    ):
+        if not api_key:
+            raise ValueError("RESEND_API_KEY is required when the Resend email provider is enabled")
+        if not from_email:
+            raise ValueError(
+                "RESEND_FROM_EMAIL is required when the Resend email provider is enabled"
+            )
+        self._api_key = api_key
+        self.from_email = from_email
+        self.timeout_seconds = max(1.0, timeout_seconds)
+
+    def send(self, recipient: str, subject: str, body: str, idempotency_key: str) -> str:
+        if not 1 <= len(idempotency_key) <= 256:
+            raise ValueError("Resend idempotency keys must contain between 1 and 256 characters")
+        payload = dump(
+            {
+                "from": self.from_email,
+                "to": [recipient],
+                "subject": subject,
+                "text": body,
+            }
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            self.endpoint,
+            data=payload,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+                "Idempotency-Key": idempotency_key,
+                "User-Agent": "alpha-clipper/0.1",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                result = load(response.read().decode("utf-8"), {})
+        except urllib.error.HTTPError as exc:
+            error_name = "unknown_error"
+            try:
+                error_name = str(load(exc.read().decode("utf-8"), {}).get("name", error_name))
+            except Exception:
+                pass
+            raise RuntimeError(f"Resend API returned HTTP {exc.code} ({error_name})") from exc
+        except urllib.error.URLError as exc:
+            raise ConnectionError("Resend API request failed") from exc
+        email_id = result.get("id")
+        if not isinstance(email_id, str) or not email_id:
+            raise RuntimeError("Resend API response did not include an email id")
+        return f"resend:{email_id}"
 
 
 class PublicationAdapter(ABC):

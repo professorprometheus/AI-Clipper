@@ -44,7 +44,7 @@ Live integrations are intentionally **not claimed complete**:
 
 - YouTube metadata/playlist/transcript access needs an implementation using permitted YouTube APIs or user-authorised imports.
 - Live social research needs platform-approved APIs and credentials; fixture/manual imports remain functional.
-- Production email needs an SMTP/API adapter and credentials; V0 writes idempotent messages to `data/emails`.
+- Production email uses Resend when configured; without credentials V0 writes idempotent messages to `data/emails`.
 - Direct posting needs each platform's approved posting API and OAuth credentials; V0 creates an approval-gated manual export instead.
 
 No adapter may bypass access controls, CAPTCHA, or platform terms.
@@ -56,6 +56,9 @@ Copy `.env.example` values into the process environment. Important settings:
 - `ALPHA_DATABASE_PATH`: SQLite database path.
 - `ALPHA_STORAGE_PATH`: watermarks, rendered clips, and export packages.
 - `ALPHA_EMAIL_SINK_PATH`: development email messages.
+- `ALPHA_EMAIL_PROVIDER`: `auto` (Resend when a key exists, otherwise file), `resend`, or `file`.
+- `RESEND_API_KEY`: a Resend sending-access API key.
+- `RESEND_FROM_EMAIL`: sender name/address at a verified Resend domain.
 - `ALPHA_PROVIDER_MODE`: `fixture` or manual/import fallback.
 - `ALPHA_API_TOKEN`: optional API token required through `X-Alpha-Token` when configured.
 - `ALPHA_LEASE_SECONDS`: worker lease duration; expired leases are recoverable.
@@ -68,6 +71,16 @@ Copy `.env.example` values into the process environment. Important settings:
 Secrets must be supplied through environment/deployment secret management and must never be committed or logged.
 
 When authentication is enabled, the UI uses a hashed, expiring server-side session, an HttpOnly SameSite cookie and CSRF protection for unsafe methods. Startup fails closed if administrator credentials are missing. This is a single-admin V0 boundary, not a substitute for a production multi-user identity provider.
+
+### Resend setup
+
+1. Add and verify a domain in the [Resend dashboard](https://resend.com/docs/dashboard/domains/introduction).
+2. Create a sending-access API key and store it as `RESEND_API_KEY`.
+3. Set `RESEND_FROM_EMAIL`, for example `ALPHA <notifications@updates.example.com>`.
+4. Leave `ALPHA_EMAIL_PROVIDER=auto` or set it explicitly to `resend`.
+5. Run `python -m alpha.ops doctor`; its email check reports readiness without printing the key.
+
+Review-ready messages include the campaign name, sources analysed, research summary, candidates considered, clips produced and review URL. ALPHA supplies its durable notification key to Resend's [idempotency header](https://resend.com/docs/dashboard/emails/idempotency-keys). The file adapter remains the credential-free local/CI fallback.
 
 ## Durable processing model
 

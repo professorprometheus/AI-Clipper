@@ -17,7 +17,7 @@ Last updated: 2026-08-12
 | 7 Rendering + rule engine | Complete for generated and imported authorised media | FFmpeg cuts imported source timestamps, converts to 9:16 H.264/AAC, burns captions/headlines, applies uploaded/generated watermark controls, probes output and records render lineage. Repeat renders are byte-stable in the tested environment. |
 | 8 QA + review dashboard | Complete | Video/evidence/score/style/compliance display; approve/change/reject; deterministic failure blocks approval; audited rule revision re-evaluates QA and revokes invalid approvals; history retained. |
 | 9 Edit loop | Complete | Natural-language parser covers timing, caption/watermark size/position, crop, headline and context; child renders preserve parents. |
-| 10 Email notification | Complete for development sink | Provider abstraction; exactly-once review-ready and terminal-failure messages; secret-redacted content and correct campaign URLs. Production SMTP/API adapter is not configured. |
+| 10 Email notification | Production-capable; live credentials pending | File sink plus Resend HTTPS adapter with provider idempotency, secret-safe failures and configuration diagnostics. Review-ready messages include campaign/source/research/candidate/clip counts and dashboard URL. Live delivery is not claimed until a Resend key and verified sender domain are supplied and exercised. |
 | 11 Approval-gated publication | Complete for export fallback | Campaign-scoped connected accounts, approval and QA gates, approved-source/account rechecks, idempotent publication and manual export instructions. Live posting APIs are not configured. |
 | 12 Feedback + performance | Complete | Human feedback and market snapshots remain independent; fixed reason taxonomy; computed revenue per clip/human-hour; disagreement API/dashboard signal. |
 | 13 Research Ledger + experiments | Complete | Prediction policy recorded before outcome; deterministic control/treatment assignment before scoring; exploration allocation; arm outcome summaries; auditable activation and rollback. |
@@ -32,7 +32,7 @@ The vertically complete single-user V0 is implemented and tested with fixture pr
 - `ruff check alpha tests`: passed (2026-08-12).
 - `ruff format --check alpha tests`: passed (2026-08-12).
 - `node --check web/app.js`: passed (2026-08-12).
-- `pytest`: 15 passed in 231.12s (2026-08-12), including durability, auth/CSRF, imports, real media, experiment, publication and operations coverage.
+- `pytest`: 19 passed in 120.23s (2026-08-12), including durability, auth/CSRF, imports, real media, Resend contract, experiment, publication and operations coverage.
 - Authenticated in-app browser smoke: signed in, submitted a campaign with a selected export account, left the worker processing, reloaded to `awaiting_review` with three QA-passed variants, and opened the populated Research Ledger.
 - FFmpeg: bundled `imageio-ffmpeg` executable used for fixture and rights-attested imported MP4 renders; actual resolution/audio/duration are probed by QA.
 
@@ -44,7 +44,7 @@ Production/live limitations are external-access or deployment work and are not r
 
 - permitted YouTube metadata/playlist/transcript and authorised media access;
 - platform-approved live social research APIs/data imports;
-- SMTP/API email credentials and production adapter;
+- Resend API key and verified sender domain for live email validation;
 - platform posting approval/OAuth and supported posting adapters;
 - production external identity provider, PostgreSQL/multi-host validation and deployment secret manager.
 
@@ -56,7 +56,7 @@ The implemented fixture/manual adapters and approval-gated export remain the doc
 |---|---|---|---|
 | YouTube | API key/OAuth and content access rights as applicable | No | Fixture resolver plus rights-attested local video/transcript import |
 | Social research platforms | Approved API/data access | No | Deterministic fixture plus audited observation imports |
-| Email | SMTP/API credentials | No | Idempotent file email sink |
+| Email | Resend sending-access API key + verified sender domain | Adapter implemented; live credentials absent | Idempotent file email sink |
 | Social publishing | Platform app approval + OAuth | No | Explicit-approval manual export package |
 
 ## Resume instructions

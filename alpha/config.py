@@ -23,10 +23,23 @@ class Settings:
     admin_password: str = ""
     session_hours: int = 12
     cookie_secure: bool = False
+    email_provider: str = "file"
+    resend_api_key: str = ""
+    resend_from_email: str = ""
+    email_timeout_seconds: float = 10.0
 
     @classmethod
     def from_env(cls) -> Settings:
         root = Path(__file__).resolve().parent.parent
+        resend_api_key = os.getenv("RESEND_API_KEY", "")
+        configured_email_provider = os.getenv("ALPHA_EMAIL_PROVIDER", "auto").lower()
+        email_provider = (
+            "resend"
+            if configured_email_provider == "auto" and resend_api_key
+            else "file"
+            if configured_email_provider == "auto"
+            else configured_email_provider
+        )
         return cls(
             database_path=Path(os.getenv("ALPHA_DATABASE_PATH", root / "data" / "alpha.db")),
             storage_path=Path(os.getenv("ALPHA_STORAGE_PATH", root / "data" / "storage")),
@@ -44,4 +57,8 @@ class Settings:
             admin_password=os.getenv("ALPHA_ADMIN_PASSWORD", ""),
             session_hours=int(os.getenv("ALPHA_SESSION_HOURS", "12")),
             cookie_secure=os.getenv("ALPHA_COOKIE_SECURE", "false").lower() in {"1", "true", "yes"},
+            email_provider=email_provider,
+            resend_api_key=resend_api_key,
+            resend_from_email=os.getenv("RESEND_FROM_EMAIL", ""),
+            email_timeout_seconds=float(os.getenv("ALPHA_EMAIL_TIMEOUT_SECONDS", "10")),
         )

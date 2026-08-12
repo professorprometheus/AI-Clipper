@@ -183,3 +183,20 @@ Retries preserve assignments and comparisons are reproducible. Exploration remai
 
 Alternatives considered:
 Random assignment on every run and post-score bucketing were rejected because they are unstable or biased.
+
+---
+
+### ADR-010 — Resend for production notification delivery
+Status: Accepted
+
+Context:
+The file email sink is suitable for local development but cannot notify a user after remote background processing. The production path needs retry-safe delivery without replacing the free local workflow.
+
+Decision:
+Implement Resend's HTTPS email API behind the existing EmailAdapter. Send the durable ALPHA notification key as Resend's idempotency key, use plain-text bodies, retain only the returned email ID, and automatically select Resend when an API key is present. Require a configured sender at a verified domain and expose only boolean readiness in deployment diagnostics.
+
+Consequences:
+Supplying `RESEND_API_KEY` and `RESEND_FROM_EMAIL` enables production delivery without changing pipeline code. Local/CI environments remain credential-free through the file adapter. Live delivery remains unverified until real credentials and DNS are supplied.
+
+Alternatives considered:
+An SDK dependency was unnecessary for one stable HTTPS endpoint. SMTP was not selected because Resend's API exposes a direct idempotency header and structured delivery ID.

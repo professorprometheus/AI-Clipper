@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from .conftest import campaign_payload, generated_source_video
@@ -121,6 +122,13 @@ def test_end_to_end_fixture_flow(client, app):
     )
     assert len(notifications) == 1
     assert Path(notifications[0]["file_uri"]).exists()
+    review_email = json.loads(Path(notifications[0]["file_uri"]).read_text(encoding="utf-8"))
+    assert f"Campaign: {payload['name']}" in review_email["body"]
+    assert "Sources analysed: 4" in review_email["body"]
+    assert "Research summary:" in review_email["body"]
+    assert "Candidates considered:" in review_email["body"]
+    assert "Clips produced: 3" in review_email["body"]
+    assert f"/?campaign={campaign_id}" in review_email["body"]
     ledger = client.get("/api/research-ledger").json()
     assert any(row["policy_id"] for row in ledger)
 
@@ -141,8 +149,6 @@ def test_intake_supports_25_sources_and_examples_and_rejects_duplicates(client):
 
 
 def test_authorised_media_import_search_render_and_probe(client, app, tmp_path):
-    import json
-
     payload = campaign_payload(source_count=0, example_count=2)
     created = client.post("/api/campaigns", json=payload)
     assert created.status_code == 201, created.text
