@@ -27,6 +27,19 @@ class Settings:
     resend_api_key: str = ""
     resend_from_email: str = ""
     email_timeout_seconds: float = 10.0
+    youtube_api_key: str = ""
+    youtube_oauth_access_token: str = ""
+    youtube_oauth_client_id: str = ""
+    youtube_oauth_client_secret: str = ""
+    youtube_oauth_refresh_token: str = ""
+    tiktok_research_access_token: str = ""
+    tiktok_client_key: str = ""
+    tiktok_client_secret: str = ""
+    instagram_access_token: str = ""
+    instagram_user_id: str = ""
+    research_region: str = "GB"
+    research_lookback_days: int = 14
+    research_results_per_query: int = 10
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -44,7 +57,10 @@ class Settings:
             database_path=Path(os.getenv("ALPHA_DATABASE_PATH", root / "data" / "alpha.db")),
             storage_path=Path(os.getenv("ALPHA_STORAGE_PATH", root / "data" / "storage")),
             email_sink_path=Path(os.getenv("ALPHA_EMAIL_SINK_PATH", root / "data" / "emails")),
-            base_url=os.getenv("ALPHA_BASE_URL", "http://127.0.0.1:8000").rstrip("/"),
+            base_url=os.getenv(
+                "ALPHA_BASE_URL",
+                os.getenv("RENDER_EXTERNAL_URL", "http://127.0.0.1:8000"),
+            ).rstrip("/"),
             provider_mode=os.getenv("ALPHA_PROVIDER_MODE", "fixture"),
             worker_poll_seconds=float(os.getenv("ALPHA_WORKER_POLL_SECONDS", "1")),
             lease_seconds=int(os.getenv("ALPHA_LEASE_SECONDS", "30")),
@@ -61,4 +77,21 @@ class Settings:
             resend_api_key=resend_api_key,
             resend_from_email=os.getenv("RESEND_FROM_EMAIL", ""),
             email_timeout_seconds=float(os.getenv("ALPHA_EMAIL_TIMEOUT_SECONDS", "10")),
+            youtube_api_key=os.getenv("YOUTUBE_API_KEY", ""),
+            youtube_oauth_access_token=os.getenv("YOUTUBE_OAUTH_ACCESS_TOKEN", ""),
+            youtube_oauth_client_id=os.getenv("YOUTUBE_OAUTH_CLIENT_ID", ""),
+            youtube_oauth_client_secret=os.getenv("YOUTUBE_OAUTH_CLIENT_SECRET", ""),
+            youtube_oauth_refresh_token=os.getenv("YOUTUBE_OAUTH_REFRESH_TOKEN", ""),
+            tiktok_research_access_token=os.getenv("TIKTOK_RESEARCH_ACCESS_TOKEN", ""),
+            tiktok_client_key=os.getenv("TIKTOK_CLIENT_KEY", ""),
+            tiktok_client_secret=os.getenv("TIKTOK_CLIENT_SECRET", ""),
+            instagram_access_token=os.getenv("INSTAGRAM_ACCESS_TOKEN", ""),
+            instagram_user_id=os.getenv("INSTAGRAM_USER_ID", ""),
+            research_region=os.getenv("ALPHA_RESEARCH_REGION", "GB").upper(),
+            research_lookback_days=max(
+                1, min(30, int(os.getenv("ALPHA_RESEARCH_LOOKBACK_DAYS", "14")))
+            ),
+            research_results_per_query=max(
+                1, min(50, int(os.getenv("ALPHA_RESEARCH_RESULTS_PER_QUERY", "10")))
+            ),
         )

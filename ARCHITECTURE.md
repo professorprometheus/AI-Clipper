@@ -96,6 +96,14 @@ V0:
 - cosine similarity;
 - allow local embedding model.
 
+### Live provider boundary
+- YouTube Data API v3 handles approved video/playlist resolution, metadata and current video research.
+- YouTube caption content is retrieved only with renewable OAuth authorization for tracks the user may edit.
+- Missing caption/media access is a recorded per-source limitation, never an unofficial download.
+- Rights-attested media/transcript can be linked to the exact YouTube video ID, including playlist items.
+- TikTok Research and Instagram Graph enrich research only when their platform approvals exist; official TikTok oEmbed and public news feeds provide narrower automatic evidence.
+- `provider_events` preserves successes, partial results and access failures without storing credentials.
+
 ### Email
 Provider abstraction:
 - development console/file email adapter;
@@ -431,3 +439,8 @@ A 72-hour campaign processing job is acceptable. The architecture must not assum
 - Single-user V0 deployments may use hashed, expiring, revocable database sessions with HttpOnly SameSite cookies and CSRF protection.
 - Authentication-required startup fails closed when administrator credentials are missing.
 - API-token comparisons are constant-time; exception text is redacted before durable storage or notification.
+- OAuth client secrets, refresh tokens and platform API tokens remain environment-only; diagnostics expose booleans, never values.
+
+## Single-instance cloud deployment
+
+The Render Blueprint deliberately colocates API and worker in one container with one persistent disk. This preserves the SQLite/filesystem transaction boundary and continues processing after client disconnect. It is not horizontally scalable: PostgreSQL, shared object storage and separate services are required before multiple instances are allowed.

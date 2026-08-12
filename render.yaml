@@ -1,0 +1,51 @@
+services:
+  - type: web
+    name: alpha-clipper
+    runtime: docker
+    plan: starter
+    dockerCommand: python -m alpha.cloud
+    healthCheckPath: /api/health
+    autoDeploy: true
+    disk:
+      name: alpha-data
+      mountPath: /data
+      sizeGB: 10
+    envVars:
+      - key: ALPHA_DATABASE_PATH
+        value: /data/alpha.db
+      - key: ALPHA_STORAGE_PATH
+        value: /data/storage
+      - key: ALPHA_EMAIL_SINK_PATH
+        value: /data/emails
+      - key: ALPHA_PROVIDER_MODE
+        value: live
+      - key: ALPHA_REQUIRE_AUTH
+        value: true
+      - key: ALPHA_COOKIE_SECURE
+        value: true
+      - key: ALPHA_EMAIL_PROVIDER
+        value: resend
+      - key: ALPHA_ADMIN_EMAIL
+        sync: false
+      - key: ALPHA_ADMIN_PASSWORD
+        sync: false
+      - key: YOUTUBE_API_KEY
+        sync: false
+      - key: YOUTUBE_OAUTH_CLIENT_ID
+        sync: false
+      - key: YOUTUBE_OAUTH_CLIENT_SECRET
+        sync: false
+      - key: YOUTUBE_OAUTH_REFRESH_TOKEN
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: RESEND_FROM_EMAIL
+        sync: false
+      - key: TIKTOK_CLIENT_KEY
+        sync: false
+      - key: TIKTOK_CLIENT_SECRET
+        sync: false
+      - key: INSTAGRAM_ACCESS_TOKEN
+        sync: false
+      - key: INSTAGRAM_USER_ID
+        sync: false

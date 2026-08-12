@@ -158,6 +158,8 @@ class AlphaService:
         transcript_json: str,
         rights_attestation: str,
         title: str | None = None,
+        approved_source_id: str | None = None,
+        external_id: str | None = None,
     ) -> dict[str, Any]:
         campaign = self.db.one("SELECT * FROM campaigns WHERE id=?", (campaign_id,))
         if not campaign:
@@ -202,11 +204,55 @@ class AlphaService:
             "WHERE s.campaign_id=? AND i.media_sha256=?",
             (campaign_id, media_sha256),
         )
+        duplicate = duplicate or self.db.one(
+            "SELECT i.id FROM linked_source_media i JOIN approved_sources s ON s.id=i.approved_source_id "
+            "WHERE s.campaign_id=? AND i.media_sha256=?",
+            (campaign_id, media_sha256),
+        )
         if duplicate:
             raise ValueError("this source media has already been imported into the campaign")
 
-        approved_source_id = uid()
-        storage_key = f"sources/{campaign_id}/{approved_source_id}{suffix}"
+        linked_source = None
+        if external_id and not approved_source_id:
+            for candidate_source in self.db.all(
+                "SELECT * FROM approved_sources WHERE campaign_id=? AND source_type!='uploaded'",
+                (campaign_id,),
+            ):
+                try:
+                    resolved = self.pipeline.providers.source.resolve(
+                        candidate_source["source_type"],
+                        candidate_source["url"],
+                        candidate_source["title"],
+                    )
+                except Exception:
+                    continue
+                if any(item["external_id"] == external_id for item in resolved):
+                    approved_source_id = candidate_source["id"]
+                    break
+            if not approved_source_id:
+                raise ValueError(
+                    "external_id was not found in the campaign's approved YouTube videos/playlists"
+                )
+        if approved_source_id:
+            linked_source = self.db.one(
+                "SELECT * FROM approved_sources WHERE id=? AND campaign_id=?",
+                (approved_source_id, campaign_id),
+            )
+            if not linked_source:
+                raise ValueError("approved source link does not belong to this campaign")
+            if not external_id:
+                raise ValueError("external_id is required when linking media to a YouTube source")
+            if self.db.one(
+                "SELECT id FROM linked_source_media WHERE approved_source_id=? AND external_id=?",
+                (approved_source_id, external_id),
+            ):
+                raise ValueError("authorised media is already linked to this YouTube video")
+        approved_source_id = approved_source_id or uid()
+        storage_key = (
+            f"sources/{campaign_id}/{approved_source_id}-{stable_id(external_id)}{suffix}"
+            if external_id
+            else f"sources/{campaign_id}/{approved_source_id}{suffix}"
+        )
         media_uri = self.pipeline.providers.storage.put_bytes(storage_key, content)
         probe = self.pipeline.providers.renderer.probe_media(Path(media_uri))
         if not probe["valid"]:
@@ -223,38 +269,58 @@ class AlphaService:
             "rights_attested": True,
         }
         with self.db.transaction() as connection:
-            connection.execute(
-                "INSERT INTO approved_sources(id,campaign_id,source_type,url,canonical_url,title,status,metadata_json,created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?)",
-                (
-                    approved_source_id,
-                    campaign_id,
-                    "uploaded",
-                    source_url,
-                    source_url,
-                    title or Path(filename).stem,
-                    "pending",
-                    dump(metadata),
-                    timestamp,
-                ),
-            )
-            connection.execute(
-                "INSERT INTO source_imports(id,approved_source_id,media_uri,media_sha256,original_filename,"
-                "content_type,transcript_json,rights_attestation,rights_attested_at,created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (
-                    uid(),
-                    approved_source_id,
-                    media_uri,
-                    media_sha256,
-                    Path(filename).name,
-                    content_type or allowed[suffix],
-                    dump(segments),
-                    rights_attestation.strip(),
-                    timestamp,
-                    timestamp,
-                ),
-            )
+            if linked_source:
+                connection.execute(
+                    "INSERT INTO linked_source_media(id,approved_source_id,external_id,media_uri,media_sha256,"
+                    "original_filename,content_type,transcript_json,rights_attestation,rights_attested_at,created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        uid(),
+                        approved_source_id,
+                        external_id,
+                        media_uri,
+                        media_sha256,
+                        Path(filename).name,
+                        content_type or allowed[suffix],
+                        dump(segments),
+                        rights_attestation.strip(),
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+            else:
+                connection.execute(
+                    "INSERT INTO approved_sources(id,campaign_id,source_type,url,canonical_url,title,status,metadata_json,created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    (
+                        approved_source_id,
+                        campaign_id,
+                        "uploaded",
+                        source_url,
+                        source_url,
+                        title or Path(filename).stem,
+                        "pending",
+                        dump(metadata),
+                        timestamp,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO source_imports(id,approved_source_id,media_uri,media_sha256,original_filename,"
+                    "content_type,transcript_json,rights_attestation,rights_attested_at,created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        uid(),
+                        approved_source_id,
+                        media_uri,
+                        media_sha256,
+                        Path(filename).name,
+                        content_type or allowed[suffix],
+                        dump(segments),
+                        rights_attestation.strip(),
+                        timestamp,
+                        timestamp,
+                    ),
+                )
         self.db.audit(
             "approved_source",
             approved_source_id,
@@ -264,6 +330,7 @@ class AlphaService:
                 "media_sha256": media_sha256,
                 "segment_count": len(segments),
                 "rights_attested": True,
+                "linked_external_id": external_id,
             },
         )
         return self.db.one("SELECT * FROM approved_sources WHERE id=?", (approved_source_id,)) or {}

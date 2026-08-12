@@ -213,3 +213,45 @@ def test_authorised_media_import_search_render_and_probe(client, app, tmp_path):
     first = app.state.pipeline.providers.renderer.render(campaign_id, "golden-a", spec)
     second = app.state.pipeline.providers.renderer.render(campaign_id, "golden-b", spec)
     assert first.sha256 == second.sha256
+
+
+def test_rights_attested_media_can_link_to_a_resolved_youtube_video(client, app, tmp_path):
+    payload = campaign_payload(source_count=1, example_count=2)
+    created = client.post("/api/campaigns", json=payload).json()
+    campaign_id = created["id"]
+    approved_source_id = created["sources"][0]["id"]
+    source_bytes = generated_source_video(tmp_path / "linked-youtube-source.mp4")
+    segments = [
+        {
+            "start_ms": 0,
+            "end_ms": 4500,
+            "text": "A surprising authorised YouTube moment with proof and payoff.",
+        }
+    ]
+
+    linked = client.post(
+        f"/api/campaigns/{campaign_id}/sources/import",
+        files={"media": ("linked-youtube-source.mp4", source_bytes, "video/mp4")},
+        data={
+            "transcript_json": json.dumps(segments),
+            "rights_attestation": "I have permission to process and clip this exact source video.",
+            "external_id": "test-list-1",
+        },
+    )
+    assert linked.status_code == 201, linked.text
+    assert linked.json()["id"] == approved_source_id
+
+    client.post(f"/api/campaigns/{campaign_id}/submit")
+    stages = client.post("/api/dev/worker/run-until-idle").json()
+    assert stages[-1]["status"] == "awaiting_review"
+    source_item = app.state.db.one(
+        "SELECT * FROM source_items WHERE campaign_id=? AND external_id='test-list-1'",
+        (campaign_id,),
+    )
+    metadata = json.loads(source_item["metadata_json"])
+    assert metadata["asset_uri"].endswith(".mp4")
+    assert metadata["linked_media_id"]
+    transcript = app.state.db.one(
+        "SELECT text FROM transcript_segments WHERE source_item_id=?", (source_item["id"],)
+    )
+    assert "authorised YouTube moment" in transcript["text"]

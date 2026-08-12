@@ -69,6 +69,27 @@ def deployment_diagnostics(settings: Settings) -> dict:
         "api_key_configured": bool(settings.resend_api_key),
         "from_address_configured": bool(settings.resend_from_email),
     }
+    live_mode = settings.provider_mode == "live"
+    checks["live_providers"] = {
+        "ok": not live_mode or bool(settings.youtube_api_key),
+        "mode": settings.provider_mode,
+        "youtube_api_key_configured": bool(settings.youtube_api_key),
+        "youtube_caption_oauth_configured": bool(
+            settings.youtube_oauth_access_token
+            or (
+                settings.youtube_oauth_client_id
+                and settings.youtube_oauth_client_secret
+                and settings.youtube_oauth_refresh_token
+            )
+        ),
+        "tiktok_research_access_configured": bool(
+            settings.tiktok_research_access_token
+            or (settings.tiktok_client_key and settings.tiktok_client_secret)
+        ),
+        "instagram_research_access_configured": bool(
+            settings.instagram_access_token and settings.instagram_user_id
+        ),
+    }
     return {"ok": all(check["ok"] for check in checks.values()), "checks": checks}
 
 

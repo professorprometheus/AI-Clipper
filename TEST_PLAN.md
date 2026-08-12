@@ -89,7 +89,7 @@ Simulate a long logical job:
 
 The test does not need to run for 72 wall-clock hours. It must prove the architecture does not depend on a 72-hour-lived process.
 
-## Implemented automated coverage (2026-08-12)
+## Implemented automated coverage (2026-08-13)
 
 - `tests/test_api_e2e.py`: full fixture path, real FFmpeg renders, research outlier discrimination, evidence and style output, campaign-scoped account selection, pre-approval/wrong-account publish denial, natural-language child edit, approval, idempotent export, computed performance ratios, feedback taxonomy, one email and ledger policy provenance.
 - `tests/test_api_e2e.py`: 25 approved sources + 25 examples and duplicate URL rejection.
@@ -103,7 +103,20 @@ The test does not need to run for 72 wall-clock hours. It must prove the archite
 - `tests/test_ops.py`: deployment diagnostics cover migrations, storage round-trip, FFmpeg and authentication configuration.
 - `tests/test_email.py`: Resend payload/auth/idempotency contract, safe provider errors, automatic provider selection and fail-closed configuration.
 - `tests/test_api_e2e.py`: review-ready email contains the campaign name, expanded source count, research summary, candidate count, clip count and review URL.
+- `tests/test_live_providers.py`: YouTube playlist pagination/dedup, real metadata mapping, WebVTT timestamps, renewable caption OAuth contract, YouTube current-search evidence, TikTok oEmbed/approved Research API contracts, wider-web fallback/provenance and fail-closed live configuration.
+- `tests/test_api_e2e.py`: rights-attested media links to an exact approved YouTube/playlist video ID and supplies the transcript/render asset for that source item.
 - `tests/test_domain.py`: structured edit parsing/application and strict separation of AI-evaluated requirements from deterministic QA.
+
+## Pending credentialled acceptance
+
+Automated contracts do not constitute live-provider completion. Before Build #2 is complete, execute one real campaign on the deployed service and retain evidence that:
+
+1. a real playlist and individual video resolve through YouTube Data API v3;
+2. accessible captions or exact-ID rights-attested transcript/media produce timestamped searchable segments;
+3. provider events show real YouTube and public/approved research evidence without fixture rows;
+4. the browser/laptop closes while the remote worker reaches `awaiting_review`;
+5. Resend delivers the idempotent review email; and
+6. the dashboard plays compliant clips and supports approve/change/reject.
 
 ## Manual UI smoke (2026-08-12)
 

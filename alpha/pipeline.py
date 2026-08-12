@@ -22,6 +22,7 @@ from .domain import (
     research_signals,
     weighted_score,
 )
+from .live_providers import LiveResearchProvider, YouTubeAPIClient, YouTubeSourceProvider
 from .providers import (
     AIAdapter,
     EmailAdapter,
@@ -87,11 +88,34 @@ class Providers:
     @classmethod
     def build(cls, settings: Settings) -> Providers:
         storage = LocalStorageAdapter(settings.storage_path)
-        source: SourceProvider = (
-            FixtureSourceProvider()
-            if settings.provider_mode == "fixture"
-            else ManualImportSourceProvider()
-        )
+        if settings.provider_mode == "fixture":
+            source: SourceProvider = FixtureSourceProvider()
+            research: ResearchProvider = FixtureResearchProvider()
+        elif settings.provider_mode == "live":
+            youtube = YouTubeAPIClient(
+                settings.youtube_api_key,
+                settings.youtube_oauth_access_token,
+                settings.youtube_oauth_client_id,
+                settings.youtube_oauth_client_secret,
+                settings.youtube_oauth_refresh_token,
+            )
+            source = YouTubeSourceProvider(youtube)
+            research = LiveResearchProvider(
+                youtube,
+                tiktok_token=settings.tiktok_research_access_token,
+                tiktok_client_key=settings.tiktok_client_key,
+                tiktok_client_secret=settings.tiktok_client_secret,
+                instagram_token=settings.instagram_access_token,
+                instagram_user_id=settings.instagram_user_id,
+                region=settings.research_region,
+                lookback_days=settings.research_lookback_days,
+                results_per_query=settings.research_results_per_query,
+            )
+        elif settings.provider_mode == "manual":
+            source = ManualImportSourceProvider()
+            research = ManualResearchProvider()
+        else:
+            raise ValueError(f"Unsupported provider mode: {settings.provider_mode}")
         if settings.email_provider == "file":
             email: EmailAdapter = FileEmailAdapter(settings.email_sink_path)
         elif settings.email_provider == "resend":
@@ -105,9 +129,7 @@ class Providers:
         return cls(
             storage=storage,
             source=source,
-            research=FixtureResearchProvider()
-            if settings.provider_mode == "fixture"
-            else ManualResearchProvider(),
+            research=research,
             email=email,
             publication=ManualExportAdapter(storage),
             renderer=Renderer(storage),
@@ -420,6 +442,30 @@ class Pipeline:
             row["value"] = load(row.pop("value_json"))
         return rows
 
+    def _record_provider_events(self, campaign_id: str, provider: Any) -> None:
+        events = list(getattr(provider, "last_events", []))
+        for event in events:
+            details = {
+                key: redact_secrets(str(value)) if key == "error" else value
+                for key, value in event.items()
+                if key not in {"provider", "operation", "status"}
+            }
+            self.db.execute(
+                "INSERT INTO provider_events(id,campaign_id,provider,operation,status,details_json,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (
+                    uid(),
+                    campaign_id,
+                    event.get("provider", "unknown"),
+                    event.get("operation", "unknown"),
+                    event.get("status", "unknown"),
+                    dump(details),
+                    now(),
+                ),
+            )
+        if hasattr(provider, "last_events"):
+            provider.last_events = []
+
     def validate_campaign(self, campaign_id: str, job_id: str) -> dict[str, Any]:
         campaign = self._campaign(campaign_id)
         sources = self.db.all("SELECT * FROM approved_sources WHERE campaign_id=?", (campaign_id,))
@@ -432,37 +478,74 @@ class Pipeline:
 
     def resolve_sources(self, campaign_id: str, job_id: str) -> dict[str, Any]:
         sources = self.db.all("SELECT * FROM approved_sources WHERE campaign_id=?", (campaign_id,))
-        count = 0
+        failures = 0
         for source in sources:
-            if source["source_type"] == "uploaded":
-                imported = self.db.one(
-                    "SELECT * FROM source_imports WHERE approved_source_id=?", (source["id"],)
-                )
-                if not imported:
-                    raise ValueError("uploaded approved source is missing its import record")
-                source_metadata = load(source["metadata_json"], {})
-                probe = source_metadata.get("probe", {})
-                resolved_items = [
-                    {
-                        "external_id": imported["media_sha256"],
-                        "source_url": source["url"],
-                        "title": source["title"] or imported["original_filename"],
-                        "duration_ms": probe.get("duration_ms", 0),
-                        "channel": "authorised_upload",
-                        "metadata": {
-                            "provider": "authorised_upload",
-                            "asset_uri": imported["media_uri"],
-                            "media_sha256": imported["media_sha256"],
-                            "probe": probe,
-                            "rights_attested_at": imported["rights_attested_at"],
-                        },
+            try:
+                if source["source_type"] == "uploaded":
+                    imported = self.db.one(
+                        "SELECT * FROM source_imports WHERE approved_source_id=?", (source["id"],)
+                    )
+                    if not imported:
+                        raise ValueError("uploaded approved source is missing its import record")
+                    source_metadata = load(source["metadata_json"], {})
+                    probe = source_metadata.get("probe", {})
+                    resolved_items = [
+                        {
+                            "external_id": imported["media_sha256"],
+                            "source_url": source["url"],
+                            "title": source["title"] or imported["original_filename"],
+                            "duration_ms": probe.get("duration_ms", 0),
+                            "channel": "authorised_upload",
+                            "metadata": {
+                                "provider": "authorised_upload",
+                                "asset_uri": imported["media_uri"],
+                                "media_sha256": imported["media_sha256"],
+                                "probe": probe,
+                                "rights_attested_at": imported["rights_attested_at"],
+                            },
+                        }
+                    ]
+                else:
+                    resolved_items = self.providers.source.resolve(
+                        source["source_type"], source["url"], source["title"]
+                    )
+                    linked_media = {
+                        row["external_id"]: row
+                        for row in self.db.all(
+                            "SELECT * FROM linked_source_media WHERE approved_source_id=?",
+                            (source["id"],),
+                        )
                     }
-                ]
-            else:
-                resolved_items = self.providers.source.resolve(
-                    source["source_type"], source["url"], source["title"]
+                    for item in resolved_items:
+                        linked = linked_media.get(item["external_id"])
+                        if linked:
+                            item["metadata"].update(
+                                {
+                                    "asset_uri": linked["media_uri"],
+                                    "media_sha256": linked["media_sha256"],
+                                    "linked_media_id": linked["id"],
+                                    "rights_attested_at": linked["rights_attested_at"],
+                                }
+                            )
+            except Exception as exc:
+                failures += 1
+                metadata = load(source["metadata_json"], {})
+                metadata["resolution_error"] = {
+                    "type": type(exc).__name__,
+                    "message": redact_secrets(str(exc)),
+                }
+                self.db.execute(
+                    "UPDATE approved_sources SET status='resolution_failed',metadata_json=? WHERE id=?",
+                    (dump(metadata), source["id"]),
                 )
+                continue
             for item in resolved_items:
+                existing = self.db.one(
+                    "SELECT id FROM source_items WHERE campaign_id=? AND external_id=?",
+                    (campaign_id, item["external_id"]),
+                )
+                if existing:
+                    continue
                 self.db.execute(
                     "INSERT OR IGNORE INTO source_items(id,approved_source_id,campaign_id,external_id,"
                     "source_url,title,duration_ms,channel,published_at,metadata_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -482,15 +565,23 @@ class Pipeline:
             self.db.execute(
                 "UPDATE approved_sources SET status='resolved' WHERE id=?", (source["id"],)
             )
+        self._record_provider_events(campaign_id, self.providers.source)
         count = self.db.one(
             "SELECT COUNT(*) AS n FROM source_items WHERE campaign_id=?", (campaign_id,)
         )["n"]
-        return {"source_items": count, "approved_sources": len(sources)}
+        if count == 0:
+            raise ValueError("no approved source could be resolved")
+        return {
+            "source_items": count,
+            "approved_sources": len(sources),
+            "failed_sources": failures,
+        }
 
     def ingest_sources(self, campaign_id: str, job_id: str) -> dict[str, Any]:
         campaign = self._campaign(campaign_id)
         seeds = load(campaign["research_seeds_json"], [])
         items = self.db.all("SELECT * FROM source_items WHERE campaign_id=?", (campaign_id,))
+        transcript_failed_items: set[str] = set()
         for item in items:
             metadata = load(item["metadata_json"], {})
             if metadata.get("provider") == "authorised_upload":
@@ -500,8 +591,26 @@ class Pipeline:
                     (item["id"],),
                 )
                 segments = load(imported["transcript_json"], []) if imported else []
+            elif metadata.get("linked_media_id"):
+                imported = self.db.one(
+                    "SELECT transcript_json FROM linked_source_media WHERE id=?",
+                    (metadata["linked_media_id"],),
+                )
+                segments = load(imported["transcript_json"], []) if imported else []
             else:
-                segments = self.providers.source.transcript(item, seeds)
+                try:
+                    segments = self.providers.source.transcript(item, seeds)
+                except Exception as exc:
+                    transcript_failed_items.add(item["id"])
+                    metadata["transcript_error"] = {
+                        "type": type(exc).__name__,
+                        "message": redact_secrets(str(exc)),
+                    }
+                    self.db.execute(
+                        "UPDATE source_items SET metadata_json=? WHERE id=?",
+                        (dump(metadata), item["id"]),
+                    )
+                    segments = []
             for segment in segments:
                 self.db.execute(
                     "INSERT OR IGNORE INTO transcript_segments(id,source_item_id,start_ms,end_ms,text,embedding_json) "
@@ -515,24 +624,58 @@ class Pipeline:
                         dump(embedding(segment["text"])),
                     ),
                 )
+            if not segments:
+                transcript_failed_items.add(item["id"])
+                metadata["transcript_status"] = "unavailable_requires_authorised_caption_or_media"
+                self.db.execute(
+                    "UPDATE source_items SET metadata_json=? WHERE id=?",
+                    (dump(metadata), item["id"]),
+                )
+        self._record_provider_events(campaign_id, self.providers.source)
         total = self.db.one(
             "SELECT COUNT(*) AS n FROM transcript_segments t JOIN source_items s ON s.id=t.source_item_id "
             "WHERE s.campaign_id=?",
             (campaign_id,),
         )["n"]
-        return {"transcript_segments": total, "indexed_source_items": len(items)}
+        return {
+            "transcript_segments": total,
+            "indexed_source_items": len(items) - len(transcript_failed_items),
+            "transcript_unavailable": len(transcript_failed_items),
+        }
 
     def analyse_successful_examples(self, campaign_id: str, job_id: str) -> dict[str, Any]:
         examples = self.db.all(
             "SELECT * FROM successful_examples WHERE campaign_id=?", (campaign_id,)
         )
         analysed = []
+        live_evidence: list[dict[str, Any]] = []
+        inspector = getattr(self.providers.research, "inspect_examples", None)
+        if callable(inspector):
+            live_evidence = inspector(examples)
+            self._record_provider_events(campaign_id, self.providers.research)
         for index, example in enumerate(examples):
-            analysis = self.providers.ai.analyse_example(example, index)
+            evidence = next(
+                (
+                    row
+                    for row in live_evidence
+                    if row["url"] == example["url"]
+                    or (
+                        row["platform"] == "youtube"
+                        and row["url"].split("v=")[-1] in example["url"]
+                    )
+                ),
+                None,
+            )
+            enriched = {**example, "live_evidence": evidence}
+            analysis = self.providers.ai.analyse_example(enriched, index)
+            if evidence:
+                analysis["live_evidence"] = evidence["raw"]
             self.db.execute(
                 "UPDATE successful_examples SET transcript=?,analysis_json=? WHERE id=?",
                 (
-                    "A supplied successful example with a direct hook, proof and payoff.",
+                    evidence["transcript"]
+                    if evidence
+                    else "Live metadata unavailable; analysis remains heuristic.",
                     dump(analysis),
                     example["id"],
                 ),
@@ -581,7 +724,7 @@ class Pipeline:
         campaign = self._campaign(campaign_id)
         seeds = load(campaign["research_seeds_json"], [])
         examples = self.db.all(
-            "SELECT platform,creator,analysis_json FROM successful_examples WHERE campaign_id=?",
+            "SELECT url,platform,creator,analysis_json FROM successful_examples WHERE campaign_id=?",
             (campaign_id,),
         )
         queries = self.providers.ai.generate_research_queries(campaign, seeds, examples)
@@ -590,7 +733,8 @@ class Pipeline:
                 "INSERT OR IGNORE INTO research_targets(id,campaign_id,target_type,value) VALUES (?,?,?,?)",
                 (uid(), campaign_id, "generated_query", query),
             )
-        raw = self.providers.research.collect(campaign, seeds)
+        raw = self.providers.research.collect(campaign, seeds, queries, examples)
+        self._record_provider_events(campaign_id, self.providers.research)
         imported = self.db.all(
             "SELECT * FROM research_imports WHERE campaign_id=? ORDER BY imported_at",
             (campaign_id,),
@@ -801,11 +945,15 @@ class Pipeline:
             if experiment
             else policy
         )
+        skipped_without_transcript = 0
         for source_index, item in enumerate(items):
             segments = self.db.all(
                 "SELECT * FROM transcript_segments WHERE source_item_id=? ORDER BY start_ms",
                 (item["id"],),
             )
+            if not segments:
+                skipped_without_transcript += 1
+                continue
             for pass_name, segment in (
                 (
                     "research_matched",
@@ -853,7 +1001,12 @@ class Pipeline:
                         dump(evidence_ids),
                         dump(scores),
                         f"{pass_name.replace('_', ' ').title()} from approved source; strong hook and evidence alignment.",
-                        dump({"score": saturation, "method": "fixture topic-frequency proxy"}),
+                        dump(
+                            {
+                                "score": saturation,
+                                "method": "topic-frequency proxy",
+                            }
+                        ),
                         predicted,
                         applied_policy["id"],
                         "discovered",
@@ -891,13 +1044,31 @@ class Pipeline:
         count = self.db.one(
             "SELECT COUNT(*) AS n FROM candidate_moments WHERE campaign_id=?", (campaign_id,)
         )["n"]
-        return {"candidates": count, "source_items_searched": len(items), "passes": 2}
+        return {
+            "candidates": count,
+            "source_items_searched": len(items) - skipped_without_transcript,
+            "source_items_without_transcript": skipped_without_transcript,
+            "passes": 2,
+        }
 
     def rank_candidates(self, campaign_id: str, job_id: str) -> dict[str, Any]:
         candidates = self.db.all(
             "SELECT * FROM candidate_moments WHERE campaign_id=? ORDER BY predicted_score DESC",
             (campaign_id,),
         )
+        if self.settings.provider_mode == "live":
+            candidates.sort(
+                key=lambda candidate: bool(
+                    load(
+                        self.db.one(
+                            "SELECT metadata_json FROM source_items WHERE id=?",
+                            (candidate["source_item_id"],),
+                        )["metadata_json"],
+                        {},
+                    ).get("asset_uri")
+                ),
+                reverse=True,
+            )
         for index, candidate in enumerate(candidates):
             self.db.execute(
                 "UPDATE candidate_moments SET status=? WHERE id=?",
@@ -942,6 +1113,12 @@ class Pipeline:
                 (candidate["source_item_id"], campaign_id),
             )
             source_metadata = load(source_item["metadata_json"], {})
+            if self.settings.provider_mode == "live" and not source_metadata.get("asset_uri"):
+                self.db.execute(
+                    "UPDATE candidate_moments SET status='render_blocked_missing_authorised_media' WHERE id=?",
+                    (candidate["id"],),
+                )
+                continue
             spec = {
                 "source_item_id": candidate["source_item_id"],
                 "source_asset_uri": source_metadata.get("asset_uri"),
@@ -991,6 +1168,10 @@ class Pipeline:
                 ),
             )
             rendered += 1
+        if self.settings.provider_mode == "live" and rendered == 0:
+            raise ValueError(
+                "selected moments need rights-attested source media linked by YouTube video id before rendering"
+            )
         return {"rendered_variants": rendered, "renderer": "ffmpeg_with_manifest_fallback"}
 
     def qa(self, campaign_id: str, job_id: str) -> dict[str, Any]:

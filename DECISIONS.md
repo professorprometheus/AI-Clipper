@@ -200,3 +200,37 @@ Supplying `RESEND_API_KEY` and `RESEND_FROM_EMAIL` enables production delivery w
 
 Alternatives considered:
 An SDK dependency was unnecessary for one stable HTTPS endpoint. SMTP was not selected because Resend's API exposes a direct idempotency header and structured delivery ID.
+
+---
+
+### ADR-011 — Official live providers with explicit access degradation
+Status: Accepted
+
+Context:
+Build #2 must use real approved YouTube sources and current external evidence without scraping private endpoints or disguising manual/fixture data as live research. Platform APIs expose materially different access levels.
+
+Decision:
+Use YouTube Data API v3 for source resolution, playlist pagination, metadata and research. Use captions.list/download only through renewable OAuth credentials for tracks the user may edit. Use official TikTok oEmbed for supplied examples, the approved TikTok Research API with automatically renewed client credentials when authorized, Instagram Graph hashtag research for authorized professional accounts, and public news indexes as wider-web mention evidence. Persist provider events and raw provenance, isolate failures per source/query, and keep metrics with different semantics explicitly labelled.
+
+Consequences:
+YouTube metadata/research is automatic with an API key, while inaccessible captions truthfully require rights-attested media/transcript. TikTok/Instagram depth improves when their approvals are supplied without blocking the base YouTube/public-web workflow. No fixture provider participates in live mode.
+
+Alternatives considered:
+Unofficial YouTube transcript endpoints, platform scraping and anti-bot workarounds were rejected. Treating news mentions as views or silently falling back to fixture observations was also rejected.
+
+---
+
+### ADR-012 — Single Render service for the SQLite deployment boundary
+Status: Accepted
+
+Context:
+The current durable queue and media store are local to SQLite/filesystem. Separate cloud API and worker services cannot safely share a Render persistent disk, and a free ephemeral instance cannot preserve jobs or clips.
+
+Decision:
+Deploy one Docker web service that runs the API and one background worker thread against a single encrypted persistent disk. Use Render's starter tier because disks require a paid service. Keep database leases/checkpoints so process restarts remain recoverable, but prevent multi-instance scaling until PostgreSQL/object storage replace the local state boundary.
+
+Consequences:
+Closing the user's browser/laptop does not stop processing after deployment. The configuration has a small unavoidable hosting cost and brief deployment downtime, and actual deployment still requires the user's Render account and billing approval.
+
+Alternatives considered:
+Render's free ephemeral filesystem fails durability. Separate services with SQLite cannot share state. A PostgreSQL/object-storage migration is the correct later multi-host design but is larger than the one-campaign Build #2 objective.

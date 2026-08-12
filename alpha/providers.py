@@ -122,7 +122,13 @@ class ManualImportSourceProvider(FixtureSourceProvider):
 
 class ResearchProvider(ABC):
     @abstractmethod
-    def collect(self, campaign: dict[str, Any], seeds: list[str]) -> list[dict[str, Any]]: ...
+    def collect(
+        self,
+        campaign: dict[str, Any],
+        seeds: list[str],
+        queries: list[str] | None = None,
+        examples: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]: ...
 
 
 class AIAdapter(ABC):
@@ -149,6 +155,65 @@ class LocalHeuristicAIAdapter(AIAdapter):
     """Free deterministic development adapter; outputs remain explicitly heuristic/AI-labelled."""
 
     def analyse_example(self, example: dict[str, Any], index: int) -> dict[str, Any]:
+        live = example.get("live_evidence")
+        if live:
+            text = str(live.get("transcript", "")).strip()
+            lowered = text.lower()
+            first_line = text.split(".", 1)[0]
+            words = first_line.split()
+            if any(token in lowered for token in ("wrong", "mistake", "truth", "never")):
+                opening_type = "contrarian_claim"
+            elif first_line.lower().startswith(("how ", "why ")):
+                opening_type = "question_or_explanation"
+            elif re.search(r"\b\d+\b", first_line):
+                opening_type = "numbered_promise"
+            else:
+                opening_type = "direct_topic_hook"
+            humour = 0.8 if any(token in lowered for token in ("funny", "lol", "comedy")) else 0.2
+            controversy = (
+                0.7
+                if any(token in lowered for token in ("wrong", "controvers", "exposed"))
+                else 0.25
+            )
+            duration_seconds = 30
+            duration = str(live.get("raw", {}).get("duration", ""))
+            match = re.fullmatch(
+                r"PT(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+(?:\.\d+)?)S)?",
+                duration,
+            )
+            if match:
+                duration_seconds = int(
+                    int(match.group("hours") or 0) * 3600
+                    + int(match.group("minutes") or 0) * 60
+                    + float(match.group("seconds") or 0)
+                )
+            return {
+                "hook": first_line[:180] or "metadata-derived opening",
+                "topic": live.get("labels", {}).get("topic", "successful example"),
+                "subtopic": "metadata-derived",
+                "emotion": "humour"
+                if humour >= 0.8
+                else ("tension" if controversy >= 0.7 else "informational"),
+                "controversy": controversy,
+                "humour": humour,
+                "context": "estimated_from_public_metadata",
+                "structure": [opening_type, "description_or_voice_text", "payoff_unknown"],
+                "duration_seconds": duration_seconds,
+                "opening_type": opening_type,
+                "headline": "short" if len(words) <= 12 else "long",
+                "caption_pattern": "not_measurable_from_metadata",
+                "crop": "not_measurable_from_metadata",
+                "pacing": "not_measurable_from_metadata",
+                "ending": "not_measurable_from_metadata",
+                "evidence": {
+                    "example_id": example["id"],
+                    "url": example["url"],
+                    "provider": live.get("raw", {}).get("provider"),
+                    "provenance": live.get("raw", {}).get("provenance"),
+                },
+                "confidence": 0.78,
+                "adapter": "local_live_metadata_heuristic_v1",
+            }
         return {
             "hook": "contrarian promise",
             "topic": "campaign-aligned insight",
@@ -210,7 +275,13 @@ class LocalHeuristicAIAdapter(AIAdapter):
 class FixtureResearchProvider(ResearchProvider):
     """Known deterministic dataset containing relative outliers and a semantic cluster."""
 
-    def collect(self, campaign: dict[str, Any], seeds: list[str]) -> list[dict[str, Any]]:
+    def collect(
+        self,
+        campaign: dict[str, Any],
+        seeds: list[str],
+        queries: list[str] | None = None,
+        examples: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
         topic = seeds[0] if seeds else "audience growth"
         rows = [
             ("small-a", 1_600, 100, 4, "surprising proof", topic),
@@ -239,7 +310,13 @@ class FixtureResearchProvider(ResearchProvider):
 class ManualResearchProvider(ResearchProvider):
     """No-network provider; observations enter through the audited import endpoint."""
 
-    def collect(self, campaign: dict[str, Any], seeds: list[str]) -> list[dict[str, Any]]:
+    def collect(
+        self,
+        campaign: dict[str, Any],
+        seeds: list[str],
+        queries: list[str] | None = None,
+        examples: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
         return []
 
 

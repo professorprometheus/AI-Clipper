@@ -238,6 +238,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         transcript_json: str = Form(...),
         rights_attestation: str = Form(...),
         title: str | None = Form(default=None),
+        approved_source_id: str | None = Form(default=None),
+        external_id: str | None = Form(default=None),
     ):
         try:
             content = await media.read()
@@ -249,6 +251,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 transcript_json,
                 rights_attestation,
                 title,
+                approved_source_id,
+                external_id,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -343,11 +347,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "WHERE campaign_id=? AND target_type='generated_query' ORDER BY value",
             (campaign_id,),
         )
+        provider_events = db.all(
+            "SELECT provider,operation,status,details_json,created_at FROM provider_events "
+            "WHERE campaign_id=? ORDER BY created_at",
+            (campaign_id,),
+        )
+        for row in provider_events:
+            row["details"] = load(row.pop("details_json"), {})
         return {
             "observations": observations,
             "clusters": clusters,
             "creator_profiles": creators,
             "generated_queries": queries,
+            "provider_events": provider_events,
         }
 
     @api.get("/api/research-ledger")
