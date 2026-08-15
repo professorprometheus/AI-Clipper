@@ -40,6 +40,18 @@ class Settings:
     research_region: str = "GB"
     research_lookback_days: int = 14
     research_results_per_query: int = 10
+    database_url: str = ""
+    storage_provider: str = "local"
+    s3_endpoint_url: str = ""
+    s3_region: str = "auto"
+    s3_bucket: str = ""
+    s3_access_key_id: str = ""
+    s3_secret_access_key: str = ""
+    run_embedded_worker: bool = True
+
+    @property
+    def database_target(self) -> str | Path:
+        return self.database_url or self.database_path
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -94,4 +106,13 @@ class Settings:
             research_results_per_query=max(
                 1, min(50, int(os.getenv("ALPHA_RESEARCH_RESULTS_PER_QUERY", "10")))
             ),
+            database_url=os.getenv("DATABASE_URL", ""),
+            storage_provider=os.getenv("ALPHA_STORAGE_PROVIDER", "local").lower(),
+            s3_endpoint_url=os.getenv("S3_ENDPOINT_URL", ""),
+            s3_region=os.getenv("S3_REGION", "auto"),
+            s3_bucket=os.getenv("S3_BUCKET", ""),
+            s3_access_key_id=os.getenv("S3_ACCESS_KEY_ID", ""),
+            s3_secret_access_key=os.getenv("S3_SECRET_ACCESS_KEY", ""),
+            run_embedded_worker=os.getenv("ALPHA_RUN_EMBEDDED_WORKER", "true").lower()
+            in {"1", "true", "yes"},
         )

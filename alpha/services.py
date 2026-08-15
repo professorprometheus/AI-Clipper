@@ -51,6 +51,13 @@ class AlphaService:
                 watermark["asset_uri"] = self.pipeline.providers.storage.put_bytes(
                     f"watermarks/{campaign_id}/{stable_id(payload.watermark.filename)}{suffix}",
                     content,
+                    {
+                        ".png": "image/png",
+                        ".jpg": "image/jpeg",
+                        ".jpeg": "image/jpeg",
+                        ".webp": "image/webp",
+                        ".ppm": "image/x-portable-pixmap",
+                    }[suffix],
                 )
         self.db.execute(
             "INSERT INTO campaigns(id,name,owner_email,platform,campaign_url,payout_model,payout_value,currency,"
@@ -109,12 +116,14 @@ class AlphaService:
             self._insert_requirement(campaign_id, requirement.model_dump(), timestamp)
         for seed in payload.research_seeds:
             self.db.execute(
-                "INSERT OR IGNORE INTO research_targets(id,campaign_id,target_type,value) VALUES (?,?,?,?)",
+                "INSERT INTO research_targets(id,campaign_id,target_type,value) VALUES (?,?,?,?) "
+                "ON CONFLICT DO NOTHING",
                 (uid(), campaign_id, "keyword", seed),
             )
         for account_id in payload.target_account_ids:
             self.db.execute(
-                "INSERT OR IGNORE INTO campaign_accounts(campaign_id,account_id,created_at) VALUES (?,?,?)",
+                "INSERT INTO campaign_accounts(campaign_id,account_id,created_at) VALUES (?,?,?) "
+                "ON CONFLICT DO NOTHING",
                 (campaign_id, account_id, timestamp),
             )
         self.db.audit(
@@ -253,11 +262,16 @@ class AlphaService:
             if external_id
             else f"sources/{campaign_id}/{approved_source_id}{suffix}"
         )
-        media_uri = self.pipeline.providers.storage.put_bytes(storage_key, content)
-        probe = self.pipeline.providers.renderer.probe_media(Path(media_uri))
+        media_uri = self.pipeline.providers.storage.put_bytes(
+            storage_key, content, content_type or allowed[suffix]
+        )
+        with self.pipeline.providers.storage.materialize(media_uri) as local_media:
+            probe = self.pipeline.providers.renderer.probe_media(local_media)
         if not probe["valid"]:
+            self.pipeline.providers.storage.delete(media_uri)
             raise ValueError("uploaded source is not a readable video")
         if segments[-1]["end_ms"] > probe["duration_ms"] + 500:
+            self.pipeline.providers.storage.delete(media_uri)
             raise ValueError("transcript timestamps exceed the uploaded media duration")
 
         timestamp = now()
@@ -395,7 +409,8 @@ class AlphaService:
         if not account:
             raise KeyError("connected account not found")
         self.db.execute(
-            "INSERT OR IGNORE INTO campaign_accounts(campaign_id,account_id,created_at) VALUES (?,?,?)",
+            "INSERT INTO campaign_accounts(campaign_id,account_id,created_at) VALUES (?,?,?) "
+            "ON CONFLICT DO NOTHING",
             (campaign_id, account_id, now()),
         )
         self.db.audit(

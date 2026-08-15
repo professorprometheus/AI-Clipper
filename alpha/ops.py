@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .config import Settings
 from .db import Database
-from .providers import LocalStorageAdapter, Renderer
+from .providers import Renderer, build_storage
 
 
 def backup_database(source: Path, destination: Path) -> Path:
@@ -39,20 +39,29 @@ def cleanup_intermediates(storage: Path, older_than_days: int, apply: bool = Fal
 
 def deployment_diagnostics(settings: Settings) -> dict:
     checks: dict[str, dict] = {}
+    storage = None
     try:
-        database = Database(settings.database_path, settings.migrations_path)
+        database = Database(settings.database_target, settings.migrations_path)
         migration_count = database.one("SELECT COUNT(*) AS n FROM schema_migrations")["n"]
-        checks["database"] = {"ok": migration_count > 0, "migrations": migration_count}
+        checks["database"] = {
+            "ok": migration_count > 0,
+            "migrations": migration_count,
+            "provider": "postgres" if database.is_postgres else "sqlite",
+        }
     except Exception as exc:
         checks["database"] = {"ok": False, "error_class": type(exc).__name__}
     try:
-        storage = LocalStorageAdapter(settings.storage_path)
-        probe_path = Path(storage.put_bytes("operations/write-probe", b"alpha"))
-        probe_path.unlink()
-        checks["storage"] = {"ok": True, "path": str(settings.storage_path.resolve())}
+        storage = build_storage(settings)
+        probe_uri = storage.put_bytes("operations/write-probe", b"alpha", "text/plain")
+        round_trip = storage.get_bytes(probe_uri)
+        storage.delete(probe_uri)
+        checks["storage"] = {
+            "ok": round_trip == b"alpha",
+            **storage.diagnostic(),
+        }
     except Exception as exc:
         checks["storage"] = {"ok": False, "error_class": type(exc).__name__}
-    renderer = Renderer(LocalStorageAdapter(settings.storage_path))
+    renderer = Renderer(storage or object())  # storage is not used for binary discovery
     checks["ffmpeg"] = {"ok": bool(renderer._ffmpeg())}
     auth_configured = bool(settings.admin_email and settings.admin_password)
     checks["authentication"] = {
@@ -105,6 +114,10 @@ def main() -> None:
     args = parser.parse_args()
     settings = Settings.from_env()
     if args.command == "backup":
+        if settings.database_url:
+            raise SystemExit(
+                "Postgres backup is provider-managed; use Neon restore/history or pg_dump, not alpha.ops backup"
+            )
         destination = (
             args.destination or Path("backups") / f"alpha-{datetime.now(UTC):%Y%m%d-%H%M%S}.db"
         )

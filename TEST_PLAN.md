@@ -106,6 +106,7 @@ The test does not need to run for 72 wall-clock hours. It must prove the archite
 - `tests/test_live_providers.py`: YouTube playlist pagination/dedup, real metadata mapping, WebVTT timestamps, renewable caption OAuth contract, YouTube current-search evidence, TikTok oEmbed/approved Research API contracts, wider-web fallback/provenance and fail-closed live configuration.
 - `tests/test_api_e2e.py`: rights-attested media links to an exact approved YouTube/playlist video ID and supplies the transcript/render asset for that source item.
 - `tests/test_domain.py`: structured edit parsing/application and strict separation of AI-evaluated requirements from deterministic QA.
+- `tests/test_external_persistence.py`: S3-compatible put/get/stream/materialise/delete contract, private bucket/key validation, disposable staging, real FFmpeg output recovered by a fresh adapter, Postgres URL/query-dialect selection and database state recovered after process-style reconstruction.
 
 ## Pending credentialled acceptance
 
@@ -117,6 +118,8 @@ Automated contracts do not constitute live-provider completion. Before Build #2 
 4. the browser/laptop closes while the remote worker reaches `awaiting_review`;
 5. Resend delivers the idempotent review email; and
 6. the dashboard plays compliant clips and supports approve/change/reject.
+7. Neon contains stage checkpoints/retries/review history after both app and worker instances restart; and
+8. the final clip is still readable from R2 after the rendering worker and all local staging directories are gone.
 
 ## Manual UI smoke (2026-08-12)
 

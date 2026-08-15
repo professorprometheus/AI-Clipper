@@ -80,7 +80,7 @@ DEMO = {
 
 def main() -> None:
     settings = Settings.from_env()
-    db = Database(settings.database_path, settings.migrations_path)
+    db = Database(settings.database_target, settings.migrations_path)
     pipeline = Pipeline(db, settings)
     service = AlphaService(db, pipeline)
     campaign = service.create_campaign(CampaignCreate.model_validate(DEMO))

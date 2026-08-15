@@ -2,17 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import mimetypes
 import os
 import secrets
 import time
 from collections import defaultdict, deque
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from .config import Settings
 from .db import Database, load, now, uid
@@ -36,7 +36,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     if settings.require_auth and not (settings.admin_email and settings.admin_password):
         raise RuntimeError("ALPHA_REQUIRE_AUTH needs ALPHA_ADMIN_EMAIL and ALPHA_ADMIN_PASSWORD")
-    db = Database(settings.database_path, settings.migrations_path)
+    db = Database(settings.database_target, settings.migrations_path)
     pipeline = Pipeline(db, settings)
     service = AlphaService(db, pipeline)
     api = FastAPI(title="ALPHA V0", version="0.1.0")
@@ -302,12 +302,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         variant = db.one("SELECT file_uri FROM clip_variants WHERE id=?", (variant_id,))
         if not variant:
             raise KeyError("clip variant not found")
-        path = Path(variant["file_uri"]).resolve()
-        root = settings.storage_path.resolve()
-        if root not in path.parents or not path.exists():
+        uri = variant["file_uri"]
+        if not uri or not pipeline.providers.storage.exists(uri):
             raise KeyError("clip media not found")
-        return FileResponse(
-            path, media_type="video/mp4" if path.suffix == ".mp4" else "application/json"
+        return StreamingResponse(
+            pipeline.providers.storage.iter_bytes(uri),
+            media_type=mimetypes.guess_type(uri)[0] or "application/octet-stream",
         )
 
     @api.post("/api/campaigns/{campaign_id}/feedback", status_code=201)

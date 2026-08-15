@@ -34,7 +34,7 @@ Alternatives considered:
 ---
 
 ### ADR-001 — SQLite queue and short leased stage executions
-Status: Accepted
+Status: Accepted for local development; production extended by ADR-013
 
 Context:
 The free local path needs durable work without Redis or a continuously connected browser, and a logical campaign can span 72+ hours.
@@ -221,7 +221,7 @@ Unofficial YouTube transcript endpoints, platform scraping and anti-bot workarou
 ---
 
 ### ADR-012 — Single Render service for the SQLite deployment boundary
-Status: Accepted
+Status: Superseded by ADR-013
 
 Context:
 The current durable queue and media store are local to SQLite/filesystem. Separate cloud API and worker services cannot safely share a Render persistent disk, and a free ephemeral instance cannot preserve jobs or clips.
@@ -234,3 +234,20 @@ Closing the user's browser/laptop does not stop processing after deployment. The
 
 Alternatives considered:
 Render's free ephemeral filesystem fails durability. Separate services with SQLite cannot share state. A PostgreSQL/object-storage migration is the correct later multi-host design but is larger than the one-campaign Build #2 objective.
+
+---
+
+### ADR-013 — External durable state with scheduled stateless compute
+Status: Accepted
+
+Context:
+The paid Render disk was the only mandatory infrastructure cost. Free web instances sleep and lose local files, while video rendering exceeds typical free edge-function CPU limits. Campaign work already consists of short leased, checkpointed, idempotent stages.
+
+Decision:
+Use `DATABASE_URL` for production Postgres and keep SQLite only as the local adapter. Use private S3-compatible object storage for uploads, watermarks, rendered clips and publication exports; local files are invocation-scoped staging only. Use Neon Free and Cloudflare R2 Standard as the initial providers. Deploy the UI/API on a diskless Render Free web service with its embedded worker disabled. Run up to three sequential stages from a scheduled GitHub Actions worker hourly, with manual dispatch available for the first wake-up. PostgreSQL uses row locks with `SKIP LOCKED`, and deterministic render object keys make killed-render retries converge.
+
+Consequences:
+App and worker containers can restart independently without losing jobs, provenance, sessions, review history or clips. The browser and user's laptop are not workers. A full 11-stage campaign normally advances in four scheduled invocations, subject to provider delays/retries. The £0 target is genuine while Neon remains below 0.5 GB/100 CU-hours, R2 Standard remains below 10 GB-month/operation allowances, Render remains below its free limits, and GitHub Actions remains within its public/free or private included minutes. Scheduled Actions can be delayed, and a public repository disables schedules after 60 days without repository activity; both are operational limits, not durability failures.
+
+Alternatives considered:
+Supabase Free Postgres is viable but pauses low-activity projects after seven days and its bundled object storage allowance is smaller. Railway becomes at least $1/month after its trial, Fly.io has no general free allowance for new accounts, and Cloudflare Workers Free has a 10 ms CPU limit that cannot render video. A continuously awake worker is unnecessary for the checkpointed V0 and would introduce avoidable cost.

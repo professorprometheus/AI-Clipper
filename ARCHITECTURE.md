@@ -21,7 +21,7 @@
 ### API / application backend
 - FastAPI (Python)
 - Pydantic schemas
-- SQLAlchemy
+- explicit SQLite/Psycopg database gateway
 - REST initially; events/webhooks internally where appropriate
 
 ### Database
@@ -29,7 +29,7 @@
 - SQLite permitted for local development/tests
 - pgvector optional once semantic scale justifies it
 
-The implemented single-user V0 uses SQLite. PostgreSQL remains the required next step for multi-host workers because SQLite is not treated as a distributed queue.
+The implemented gateway selects external PostgreSQL from `DATABASE_URL` in deployed environments and retains SQLite for local development/tests. PostgreSQL acquisitions use transactional `FOR UPDATE SKIP LOCKED`; SQLite retains its immediate-write transaction.
 
 ### Durable jobs
 Implement a queue abstraction, not provider-specific business logic.
@@ -66,7 +66,9 @@ Store:
 - rendered clips;
 - thumbnails;
 - watermark assets;
-- intermediate render artefacts with retention policy.
+- publication exports.
+
+Transcripts are currently database-backed. FFmpeg intermediates are reproducible and invocation-scoped, so they are deleted with the temporary working directory rather than treated as durable artefacts.
 
 ### Video/audio
 - FFmpeg/ffprobe
@@ -441,6 +443,10 @@ A 72-hour campaign processing job is acceptable. The architecture must not assum
 - API-token comparisons are constant-time; exception text is redacted before durable storage or notification.
 - OAuth client secrets, refresh tokens and platform API tokens remain environment-only; diagnostics expose booleans, never values.
 
-## Single-instance cloud deployment
+## Stateless free-tier deployment
 
-The Render Blueprint deliberately colocates API and worker in one container with one persistent disk. This preserves the SQLite/filesystem transaction boundary and continues processing after client disconnect. It is not horizontally scalable: PostgreSQL, shared object storage and separate services are required before multiple instances are allowed.
+The Render Blueprint is a diskless free web service. Application/queue/history state is in external Postgres and durable artefacts use private S3-compatible storage. FFmpeg downloads authorised inputs to an invocation-scoped temporary directory, renders sequentially, uploads the final object, and then commits its `ClipVariant`; no temporary path is durable state.
+
+The web instance has no embedded production worker and may sleep or be destroyed safely. A scheduled GitHub Actions job starts a fresh worker hourly and processes at most three leased stages. Each invocation can therefore resume a campaign from Postgres, including expired leases and persisted retries. The same worker command can move later to continuous compute without changing queue semantics.
+
+Recommended initial providers are Neon Free Postgres, Cloudflare R2 Standard storage and a Render Free web service. Compute-heavy FFmpeg work runs on a standard GitHub-hosted Linux runner instead of a CPU-limited edge/serverless request. Public repositories receive free standard-runner usage; private GitHub Free repositories have a 2,000-minute monthly allowance, so the hourly schedule consumes at least roughly 720 rounded job-minutes per 30-day month before active render time.

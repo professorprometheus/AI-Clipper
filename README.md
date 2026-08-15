@@ -62,6 +62,10 @@ Copy `.env.example` values into the process environment. Important settings:
 - `ALPHA_DATABASE_PATH`: SQLite database path.
 - `ALPHA_STORAGE_PATH`: watermarks, rendered clips, and export packages.
 - `ALPHA_EMAIL_SINK_PATH`: development email messages.
+- `DATABASE_URL`: production Postgres connection string; takes precedence over `ALPHA_DATABASE_PATH`. Use the pooled Neon URL with TLS enabled.
+- `ALPHA_STORAGE_PROVIDER`: `local` for development or `s3` for production.
+- `S3_ENDPOINT_URL`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`: private S3-compatible object storage. For R2, use the account S3 endpoint and region `auto`.
+- `ALPHA_RUN_EMBEDDED_WORKER`: leave `true` locally; the Render Blueprint sets `false` because scheduled compute owns production work.
 - `ALPHA_EMAIL_PROVIDER`: `auto` (Resend when a key exists, otherwise file), `resend`, or `file`.
 - `RESEND_API_KEY`: a Resend sending-access API key.
 - `RESEND_FROM_EMAIL`: sender name/address at a verified Resend domain.
@@ -96,17 +100,51 @@ Review-ready messages include the campaign name, sources analysed, research summ
 
 ## Remote deployment
 
-[`render.yaml`](./render.yaml) defines one Docker web service running `python -m alpha.cloud`: the authenticated API and a durable worker share one SQLite database and media volume. This is intentionally a single instance because SQLite is not a distributed queue.
+[`render.yaml`](./render.yaml) defines a diskless Render Free web service. It may sleep after inactivity: all state is external, and [`.github/workflows/alpha-worker.yml`](./.github/workflows/alpha-worker.yml) wakes a fresh worker hourly to run up to three durable stages. `workflow_dispatch` provides an immediate first invocation. No Render persistent disk or continuously awake process is required.
 
-Render's free web tier cannot attach a persistent disk, so the Blueprint uses the starter service plus a 10 GB encrypted persistent disk. Creating it requires:
+### 1. Create the free persistence services
 
-1. Push this repository to GitHub and sign in to Render with repository access.
-2. In Render, select **New → Blueprint**, choose this repository, and approve `render.yaml`.
-3. Supply the required Blueprint secrets: `ALPHA_ADMIN_EMAIL`, `ALPHA_ADMIN_PASSWORD`, `YOUTUBE_API_KEY`, `RESEND_API_KEY`, and `RESEND_FROM_EMAIL`.
-4. For officially accessible captions, also supply the three `YOUTUBE_OAUTH_*` refresh credentials. TikTok Research and Instagram variables are optional and require their respective platform approvals.
-5. After deployment, run the service's diagnostics command `python -m alpha.ops doctor`, open `/api/health`, and execute the real campaign acceptance test before treating Build #2 as complete.
+1. Create a [Neon Free project](https://neon.com/pricing). Copy its **pooled** Postgres connection string, including `sslmode=require`, as `DATABASE_URL`. Free currently includes 0.5 GB storage and 100 CU-hours per project; compute scales to zero when idle.
+2. In Cloudflare, [enable R2](https://developers.cloudflare.com/r2/get-started/), create a **Standard** bucket, then create an R2 S3 API token scoped read/write to only that bucket. Record:
+   - `S3_ENDPOINT_URL=https://<account-id>.r2.cloudflarestorage.com`
+   - `S3_REGION=auto`
+   - `S3_BUCKET=<bucket-name>`
+   - `S3_ACCESS_KEY_ID=<token access key>`
+   - `S3_SECRET_ACCESS_KEY=<token secret>`
+3. R2 requires completing its subscription/checkout flow, but its [Standard free allowance](https://developers.cloudflare.com/r2/pricing/) is currently 10 GB-month, 1 million Class A writes, 10 million Class B reads and free egress. Set a billing notification/limit appropriate to the account.
 
-`ALPHA_BASE_URL` automatically falls back to Render's `RENDER_EXTERNAL_URL`, so review emails point to the deployed dashboard.
+### 2. Deploy the sleeping web application
+
+1. Push the repository to GitHub. In Render, choose **New → Blueprint**, connect the repository, and approve `render.yaml`.
+2. Enter every `sync: false` value requested by the Blueprint:
+   - `ALPHA_ADMIN_EMAIL`
+   - `ALPHA_ADMIN_PASSWORD`
+   - `DATABASE_URL`
+   - `S3_ENDPOINT_URL`
+   - `S3_BUCKET`
+   - `S3_ACCESS_KEY_ID`
+   - `S3_SECRET_ACCESS_KEY`
+   - `YOUTUBE_API_KEY`
+   - `RESEND_API_KEY`
+   - `RESEND_FROM_EMAIL`
+3. Optional credential fields remain `YOUTUBE_OAUTH_CLIENT_ID`, `YOUTUBE_OAUTH_CLIENT_SECRET`, `YOUTUBE_OAUTH_REFRESH_TOKEN`, `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET`, `INSTAGRAM_ACCESS_TOKEN`, and `INSTAGRAM_USER_ID`.
+4. Open `/api/health`. `ALPHA_BASE_URL` falls back to Render's `RENDER_EXTERNAL_URL`, so review emails target the deployed dashboard.
+
+### 3. Configure unattended worker invocations
+
+In the GitHub repository, add Actions secrets with the same names/values for `DATABASE_URL`, all five `S3_*` values, `YOUTUBE_API_KEY`, `RESEND_API_KEY`, and `RESEND_FROM_EMAIL`. Add `ALPHA_BASE_URL` with the full Render URL. Add the optional platform credentials if available. Enable Actions, open **ALPHA scheduled worker**, and run it once with **Run workflow**; the schedule then continues without the browser or laptop.
+
+The workflow's hourly cadence is intentionally below GitHub Free's 2,000 private-repository minutes: one-minute billing would consume approximately 720 minutes in a 30-day month, leaving roughly 1,280 minutes for setup and active renders. Standard runners are free for public repositories. If actual private-repository rendering exceeds the remaining allowance, reduce the cadence, make the repository public if appropriate, or accept GitHub's metered Linux-runner overage; no application migration is required.
+
+### Current £0 limits
+
+- Neon Free: 0.5 GB database storage and 100 CU-hours per project/month.
+- Cloudflare R2 Standard: 10 GB-month, 1 million Class A operations, 10 million Class B operations/month, and free egress.
+- [Render Free](https://render.com/docs/free): 750 running instance-hours/workspace/month; sleeps after 15 minutes without inbound traffic and loses local files by design.
+- [GitHub Actions](https://docs.github.com/en/billing/concepts/product-billing/github-actions): free standard runners for public repositories; 2,000 included minutes/month on GitHub Free private repositories. [Scheduled workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule) can be delayed and public-repository schedules disable after 60 days without repository activity.
+- Resend: use its current free/low-cost allowance; the sending domain must be verified.
+
+There is no unavoidable monthly component at this scale. Exceeding a provider allowance may suspend work or incur that provider's published usage charge, so inspect usage after the first real campaign.
 
 ## Durable processing model
 
@@ -125,13 +163,13 @@ Each worker acquisition leases exactly one stage and actively renews that lease 
 
 ## Backup, restore, and retention
 
-Create a consistent SQLite backup:
+Local SQLite only: create a consistent backup with:
 
 ```powershell
 .\.venv\Scripts\python.exe -m alpha.ops backup --destination backups\alpha.db
 ```
 
-Restore by stopping API/workers, preserving the current database, copying the validated backup to `ALPHA_DATABASE_PATH`, then starting one API instance and checking `/api/health` before workers. Object storage must be backed up/restored alongside the database because records reference local file paths.
+For production, use Neon's restore/history or `pg_dump`; `alpha.ops backup` refuses to treat a Postgres URL as a SQLite file. R2 objects are durable independently of app/worker restarts. Preserve the database and bucket as one logical backup set because database rows reference private `s3://` object URIs.
 
 Retention cleanup is dry-run by default and only targets generated `.ppm`/manifest render intermediates, never source assets, final MP4s, uploads, evidence, or history:
 
@@ -148,8 +186,9 @@ Retention cleanup is dry-run by default and only targets generated `.ppm`/manife
 - `alpha/domain.py`: scoring, signals, edit parsing, and deterministic QA.
 - `alpha/providers.py`: compliant provider abstractions and local/fixture adapters.
 - `alpha/live_providers.py`: official/permitted YouTube, TikTok, Instagram and wider-web provider clients.
-- `alpha/cloud.py`: single-instance remote API + durable worker entry point.
-- `render.yaml`: persistent Render deployment Blueprint.
-- `migrations/`: additive SQLite schema.
+- `alpha/cloud.py`: stateless web entry point with optional local/opportunistic worker.
+- `render.yaml`: diskless Render Free deployment Blueprint.
+- `.github/workflows/alpha-worker.yml`: scheduled bounded worker invocations.
+- `migrations/`: additive SQLite/Postgres schema.
 - `web/`: responsive review dashboard.
 - `tests/`: unit, API, durability, invariant, and end-to-end coverage.

@@ -3,6 +3,10 @@ services:
     build: .
     ports: ["8000:8000"]
     volumes: ["alpha-data:/data"]
+    environment:
+      ALPHA_DATABASE_PATH: /data/alpha.db
+      ALPHA_STORAGE_PATH: /data/storage
+      ALPHA_EMAIL_SINK_PATH: /data/emails
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
@@ -14,6 +18,10 @@ services:
     build: .
     command: ["python", "-m", "alpha.worker"]
     volumes: ["alpha-data:/data"]
+    environment:
+      ALPHA_DATABASE_PATH: /data/alpha.db
+      ALPHA_STORAGE_PATH: /data/storage
+      ALPHA_EMAIL_SINK_PATH: /data/emails
     depends_on: [api]
     restart: unless-stopped
 volumes:

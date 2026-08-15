@@ -30,7 +30,6 @@ from .providers import (
     FixtureResearchProvider,
     FixtureSourceProvider,
     LocalHeuristicAIAdapter,
-    LocalStorageAdapter,
     ManualExportAdapter,
     ManualImportSourceProvider,
     ManualResearchProvider,
@@ -39,6 +38,9 @@ from .providers import (
     ResearchProvider,
     ResendEmailAdapter,
     SourceProvider,
+    StorageAdapter,
+    build_storage,
+    stable_id,
 )
 
 logger = logging.getLogger("alpha.pipeline")
@@ -77,7 +79,7 @@ def redact_secrets(message: str) -> str:
 
 @dataclass
 class Providers:
-    storage: LocalStorageAdapter
+    storage: StorageAdapter
     source: SourceProvider
     research: ResearchProvider
     email: EmailAdapter
@@ -87,7 +89,7 @@ class Providers:
 
     @classmethod
     def build(cls, settings: Settings) -> Providers:
-        storage = LocalStorageAdapter(settings.storage_path)
+        storage = build_storage(settings)
         if settings.provider_mode == "fixture":
             source: SourceProvider = FixtureSourceProvider()
             research: ResearchProvider = FixtureResearchProvider()
@@ -210,7 +212,7 @@ class Pipeline:
                 "SELECT * FROM pipeline_jobs WHERE "
                 "status='queued' OR (status='retry' AND (available_at IS NULL OR available_at<=?)) "
                 "OR (status='leased' AND lease_expires_at < ?) "
-                "ORDER BY created_at LIMIT 1",
+                f"ORDER BY created_at LIMIT 1{self.db.acquire_lock_clause}",
                 (timestamp, timestamp),
             ).fetchone()
             if not row:
@@ -547,8 +549,9 @@ class Pipeline:
                 if existing:
                     continue
                 self.db.execute(
-                    "INSERT OR IGNORE INTO source_items(id,approved_source_id,campaign_id,external_id,"
-                    "source_url,title,duration_ms,channel,published_at,metadata_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO source_items(id,approved_source_id,campaign_id,external_id,"
+                    "source_url,title,duration_ms,channel,published_at,metadata_json) VALUES (?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT DO NOTHING",
                     (
                         uid(),
                         source["id"],
@@ -613,8 +616,8 @@ class Pipeline:
                     segments = []
             for segment in segments:
                 self.db.execute(
-                    "INSERT OR IGNORE INTO transcript_segments(id,source_item_id,start_ms,end_ms,text,embedding_json) "
-                    "VALUES (?,?,?,?,?,?)",
+                    "INSERT INTO transcript_segments(id,source_item_id,start_ms,end_ms,text,embedding_json) "
+                    "VALUES (?,?,?,?,?,?) ON CONFLICT DO NOTHING",
                     (
                         uid(),
                         item["id"],
@@ -730,7 +733,8 @@ class Pipeline:
         queries = self.providers.ai.generate_research_queries(campaign, seeds, examples)
         for query in queries:
             self.db.execute(
-                "INSERT OR IGNORE INTO research_targets(id,campaign_id,target_type,value) VALUES (?,?,?,?)",
+                "INSERT INTO research_targets(id,campaign_id,target_type,value) VALUES (?,?,?,?) "
+                "ON CONFLICT DO NOTHING",
                 (uid(), campaign_id, "generated_query", query),
             )
         raw = self.providers.research.collect(campaign, seeds, queries, examples)
@@ -764,8 +768,9 @@ class Pipeline:
                 item["metrics"], item["baseline"], item["published_hours_ago"]
             )
             self.db.execute(
-                "INSERT OR IGNORE INTO research_observations(id,campaign_id,platform,url,creator,observed_at,published_at,"
-                "metrics_json,baseline_json,raw_json,derived_json,transcript,labels_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO research_observations(id,campaign_id,platform,url,creator,observed_at,published_at,"
+                "metrics_json,baseline_json,raw_json,derived_json,transcript,labels_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT DO NOTHING",
                 (
                     observation_id,
                     campaign_id,
@@ -798,11 +803,11 @@ class Pipeline:
         clusters = cluster_observations(observations)
         for cluster in clusters:
             self.db.execute(
-                "INSERT OR REPLACE INTO trend_clusters(id,campaign_id,label,metrics_json,lifecycle_state,evidence_ids_json) "
-                "VALUES (COALESCE((SELECT id FROM trend_clusters WHERE campaign_id=? AND label=?),?),?,?,?,?,?)",
+                "INSERT INTO trend_clusters(id,campaign_id,label,metrics_json,lifecycle_state,evidence_ids_json) "
+                "VALUES (?,?,?,?,?,?) ON CONFLICT(campaign_id,label) DO UPDATE SET "
+                "metrics_json=excluded.metrics_json,lifecycle_state=excluded.lifecycle_state,"
+                "evidence_ids_json=excluded.evidence_ids_json",
                 (
-                    campaign_id,
-                    cluster["label"],
                     uid(),
                     campaign_id,
                     cluster["label"],
@@ -833,13 +838,12 @@ class Pipeline:
                 "topics": sorted({row["labels"]["topic"] for row in members}),
             }
             self.db.execute(
-                "INSERT OR REPLACE INTO creator_profiles(id,campaign_id,platform,creator,metrics_json,"
-                "evidence_ids_json,successful_clipper,created_at) VALUES "
-                "(COALESCE((SELECT id FROM creator_profiles WHERE campaign_id=? AND platform=? AND creator=?),?),?,?,?,?,?,?,?)",
+                "INSERT INTO creator_profiles(id,campaign_id,platform,creator,metrics_json,"
+                "evidence_ids_json,successful_clipper,created_at) VALUES (?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(campaign_id,platform,creator) DO UPDATE SET "
+                "metrics_json=excluded.metrics_json,evidence_ids_json=excluded.evidence_ids_json,"
+                "successful_clipper=excluded.successful_clipper,created_at=excluded.created_at",
                 (
-                    campaign_id,
-                    platform,
-                    creator,
                     uid(),
                     campaign_id,
                     platform,
@@ -986,9 +990,10 @@ class Pipeline:
                 predicted = weighted_score(scores, weights)
                 candidate_id = uid()
                 self.db.execute(
-                    "INSERT OR IGNORE INTO candidate_moments(id,campaign_id,source_item_id,start_ms,end_ms,transcript,"
+                    "INSERT INTO candidate_moments(id,campaign_id,source_item_id,start_ms,end_ms,transcript,"
                     "discovery_pass,research_match_json,evidence_ids_json,scores_json,selection_reason,saturation_json,"
-                    "predicted_score,policy_id,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "predicted_score,policy_id,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT DO NOTHING",
                     (
                         candidate_id,
                         campaign_id,
@@ -1025,8 +1030,8 @@ class Pipeline:
                 )
                 if experiment and stored_candidate:
                     self.db.execute(
-                        "INSERT OR IGNORE INTO experiment_assignments(id,experiment_id,candidate_id,arm,policy_id,assigned_at) "
-                        "VALUES (?,?,?,?,?,?)",
+                        "INSERT INTO experiment_assignments(id,experiment_id,candidate_id,arm,policy_id,assigned_at) "
+                        "VALUES (?,?,?,?,?,?) ON CONFLICT DO NOTHING",
                         (
                             uid(),
                             experiment["id"],
@@ -1107,7 +1112,8 @@ class Pipeline:
             if existing:
                 rendered += 1
                 continue
-            variant_id = uid()
+            # A killed worker retries the same object key instead of leaking duplicate renders.
+            variant_id = stable_id(f"{candidate['id']}:variant:1", 32)
             source_item = self.db.one(
                 "SELECT * FROM source_items WHERE id=? AND campaign_id=?",
                 (candidate["source_item_id"], campaign_id),

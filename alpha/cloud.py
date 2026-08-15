@@ -11,7 +11,7 @@ from .main import app
 
 
 def main() -> None:
-    """Run one web process and one durable worker against the same persistent SQLite volume."""
+    """Run the stateless web app, optionally with an opportunistic worker."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     stop = threading.Event()
     worker_token = f"{socket.gethostname()}:{os.getpid()}:cloud"
@@ -22,8 +22,10 @@ def main() -> None:
             if result is None:
                 stop.wait(app.state.settings.worker_poll_seconds)
 
-    worker = threading.Thread(target=worker_loop, name="alpha-cloud-worker", daemon=True)
-    worker.start()
+    worker = None
+    if app.state.settings.run_embedded_worker:
+        worker = threading.Thread(target=worker_loop, name="alpha-cloud-worker", daemon=True)
+        worker.start()
     try:
         uvicorn.run(
             app,
@@ -32,7 +34,8 @@ def main() -> None:
         )
     finally:
         stop.set()
-        worker.join(timeout=5)
+        if worker:
+            worker.join(timeout=5)
 
 
 if __name__ == "__main__":

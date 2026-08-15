@@ -2,21 +2,27 @@ services:
   - type: web
     name: alpha-clipper
     runtime: docker
-    plan: starter
+    plan: free
     dockerCommand: python -m alpha.cloud
     healthCheckPath: /api/health
     autoDeploy: true
-    disk:
-      name: alpha-data
-      mountPath: /data
-      sizeGB: 10
     envVars:
-      - key: ALPHA_DATABASE_PATH
-        value: /data/alpha.db
-      - key: ALPHA_STORAGE_PATH
-        value: /data/storage
-      - key: ALPHA_EMAIL_SINK_PATH
-        value: /data/emails
+      - key: DATABASE_URL
+        sync: false
+      - key: ALPHA_STORAGE_PROVIDER
+        value: s3
+      - key: S3_ENDPOINT_URL
+        sync: false
+      - key: S3_REGION
+        value: auto
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_ACCESS_KEY_ID
+        sync: false
+      - key: S3_SECRET_ACCESS_KEY
+        sync: false
+      - key: ALPHA_RUN_EMBEDDED_WORKER
+        value: false
       - key: ALPHA_PROVIDER_MODE
         value: live
       - key: ALPHA_REQUIRE_AUTH

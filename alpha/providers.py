@@ -10,8 +10,11 @@ import subprocess
 import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -33,10 +36,36 @@ def stable_id(value: str, length: int = 12) -> str:
 
 class StorageAdapter(ABC):
     @abstractmethod
-    def put_bytes(self, key: str, content: bytes) -> str: ...
+    def put_bytes(self, key: str, content: bytes, content_type: str | None = None) -> str: ...
+
+    def put_json(self, key: str, content: Any) -> str:
+        return self.put_bytes(
+            key,
+            json.dumps(content, indent=2, sort_keys=True).encode("utf-8"),
+            "application/json",
+        )
+
+    def put_file(self, key: str, path: Path, content_type: str | None = None) -> str:
+        return self.put_bytes(key, path.read_bytes(), content_type)
 
     @abstractmethod
-    def put_json(self, key: str, content: Any) -> str: ...
+    def get_bytes(self, uri: str) -> bytes: ...
+
+    @abstractmethod
+    def iter_bytes(self, uri: str, chunk_size: int = 1024 * 1024) -> Iterator[bytes]: ...
+
+    @abstractmethod
+    def exists(self, uri: str) -> bool: ...
+
+    @abstractmethod
+    def delete(self, uri: str) -> None: ...
+
+    @abstractmethod
+    @contextmanager
+    def materialize(self, uri: str) -> Iterator[Path]: ...
+
+    @abstractmethod
+    def diagnostic(self) -> dict[str, Any]: ...
 
 
 class LocalStorageAdapter(StorageAdapter):
@@ -51,15 +80,176 @@ class LocalStorageAdapter(StorageAdapter):
         candidate.parent.mkdir(parents=True, exist_ok=True)
         return candidate
 
-    def put_bytes(self, key: str, content: bytes) -> str:
+    def _uri_path(self, uri: str) -> Path:
+        path = Path(uri).resolve()
+        if self.root.resolve() not in path.parents:
+            raise ValueError("storage URI escapes root")
+        return path
+
+    def put_bytes(self, key: str, content: bytes, content_type: str | None = None) -> str:
         path = self._safe_path(key)
         path.write_bytes(content)
         return str(path)
 
-    def put_json(self, key: str, content: Any) -> str:
-        path = self._safe_path(key)
-        path.write_text(json.dumps(content, indent=2, sort_keys=True), encoding="utf-8")
-        return str(path)
+    def put_file(self, key: str, path: Path, content_type: str | None = None) -> str:
+        destination = self._safe_path(key)
+        shutil.copyfile(path, destination)
+        return str(destination)
+
+    def get_bytes(self, uri: str) -> bytes:
+        return self._uri_path(uri).read_bytes()
+
+    def iter_bytes(self, uri: str, chunk_size: int = 1024 * 1024) -> Iterator[bytes]:
+        with self._uri_path(uri).open("rb") as stream:
+            while chunk := stream.read(chunk_size):
+                yield chunk
+
+    def exists(self, uri: str) -> bool:
+        try:
+            return self._uri_path(uri).is_file()
+        except ValueError:
+            return False
+
+    def delete(self, uri: str) -> None:
+        self._uri_path(uri).unlink(missing_ok=True)
+
+    @contextmanager
+    def materialize(self, uri: str) -> Iterator[Path]:
+        path = self._uri_path(uri)
+        if not path.is_file():
+            raise FileNotFoundError("storage object not found")
+        yield path
+
+    def diagnostic(self) -> dict[str, Any]:
+        return {"provider": "local", "root": str(self.root.resolve())}
+
+
+class S3StorageAdapter(StorageAdapter):
+    """Private S3-compatible object storage using durable s3:// URIs."""
+
+    def __init__(
+        self,
+        endpoint_url: str,
+        region: str,
+        bucket: str,
+        access_key_id: str,
+        secret_access_key: str,
+        client: Any | None = None,
+    ):
+        if not bucket or not endpoint_url:
+            raise ValueError("S3 storage requires S3_BUCKET and S3_ENDPOINT_URL")
+        if client is None and not (access_key_id and secret_access_key):
+            raise ValueError("S3 storage requires S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY")
+        self.endpoint_url = endpoint_url.rstrip("/")
+        self.region = region
+        self.bucket = bucket
+        if client is None:
+            import boto3
+            from botocore.config import Config
+
+            client = boto3.client(
+                "s3",
+                endpoint_url=self.endpoint_url,
+                region_name=region,
+                aws_access_key_id=access_key_id,
+                aws_secret_access_key=secret_access_key,
+                config=Config(signature_version="s3v4"),
+            )
+        self.client = client
+
+    @staticmethod
+    def _key(key: str) -> str:
+        cleaned = key.replace("\\", "/").lstrip("/")
+        if not cleaned or any(part in {"", ".", ".."} for part in cleaned.split("/")):
+            raise ValueError("invalid object-storage key")
+        return cleaned
+
+    def _uri(self, key: str) -> str:
+        return f"s3://{self.bucket}/{self._key(key)}"
+
+    def _uri_key(self, uri: str) -> str:
+        prefix = f"s3://{self.bucket}/"
+        if not uri.startswith(prefix):
+            raise ValueError("object URI belongs to a different bucket")
+        return self._key(uri.removeprefix(prefix))
+
+    def put_bytes(self, key: str, content: bytes, content_type: str | None = None) -> str:
+        object_key = self._key(key)
+        kwargs: dict[str, Any] = {"Bucket": self.bucket, "Key": object_key, "Body": content}
+        if content_type:
+            kwargs["ContentType"] = content_type
+        self.client.put_object(**kwargs)
+        return self._uri(object_key)
+
+    def put_file(self, key: str, path: Path, content_type: str | None = None) -> str:
+        object_key = self._key(key)
+        extra = {"ContentType": content_type} if content_type else None
+        if extra:
+            self.client.upload_file(str(path), self.bucket, object_key, ExtraArgs=extra)
+        else:
+            self.client.upload_file(str(path), self.bucket, object_key)
+        return self._uri(object_key)
+
+    def get_bytes(self, uri: str) -> bytes:
+        response = self.client.get_object(Bucket=self.bucket, Key=self._uri_key(uri))
+        body = response["Body"]
+        try:
+            return body.read()
+        finally:
+            close = getattr(body, "close", None)
+            if close:
+                close()
+
+    def iter_bytes(self, uri: str, chunk_size: int = 1024 * 1024) -> Iterator[bytes]:
+        response = self.client.get_object(Bucket=self.bucket, Key=self._uri_key(uri))
+        body = response["Body"]
+        try:
+            while chunk := body.read(chunk_size):
+                yield chunk
+        finally:
+            close = getattr(body, "close", None)
+            if close:
+                close()
+
+    def exists(self, uri: str) -> bool:
+        try:
+            self.client.head_object(Bucket=self.bucket, Key=self._uri_key(uri))
+            return True
+        except Exception:
+            return False
+
+    def delete(self, uri: str) -> None:
+        self.client.delete_object(Bucket=self.bucket, Key=self._uri_key(uri))
+
+    @contextmanager
+    def materialize(self, uri: str) -> Iterator[Path]:
+        suffix = Path(self._uri_key(uri)).suffix
+        with TemporaryDirectory(prefix="alpha-object-") as directory:
+            path = Path(directory) / f"object{suffix}"
+            self.client.download_file(self.bucket, self._uri_key(uri), str(path))
+            yield path
+
+    def diagnostic(self) -> dict[str, Any]:
+        self.client.head_bucket(Bucket=self.bucket)
+        return {
+            "provider": "s3",
+            "bucket": self.bucket,
+            "endpoint_host": urlparse(self.endpoint_url).hostname,
+        }
+
+
+def build_storage(settings: Any) -> StorageAdapter:
+    if settings.storage_provider == "local":
+        return LocalStorageAdapter(settings.storage_path)
+    if settings.storage_provider == "s3":
+        return S3StorageAdapter(
+            settings.s3_endpoint_url,
+            settings.s3_region,
+            settings.s3_bucket,
+            settings.s3_access_key_id,
+            settings.s3_secret_access_key,
+        )
+    raise ValueError(f"Unsupported storage provider: {settings.storage_provider}")
 
 
 class SourceProvider(ABC):
@@ -435,9 +625,9 @@ class RenderResult:
 
 
 class Renderer:
-    """FFmpeg renderer for generated fixtures and explicitly authorised local source media."""
+    """FFmpeg renderer with ephemeral staging and durable output storage."""
 
-    def __init__(self, storage: LocalStorageAdapter):
+    def __init__(self, storage: StorageAdapter):
         self.storage = storage
 
     def _ffmpeg(self) -> str | None:
@@ -451,8 +641,7 @@ class Renderer:
         except Exception:
             return None
 
-    def _watermark_ppm(self, key: str) -> Path:
-        path = self.storage._safe_path(key)
+    def _watermark_ppm(self, path: Path) -> Path:
         width, height = 180, 60
         header = f"P6\n{width} {height}\n255\n".encode()
         pixels = bytearray()
@@ -508,169 +697,189 @@ class Renderer:
         }
 
     def render(self, campaign_id: str, variant_id: str, spec: dict[str, Any]) -> RenderResult:
-        output = self.storage._safe_path(f"renders/{campaign_id}/{variant_id}.mp4")
-        ffmpeg = self._ffmpeg()
-        duration = max(1.0, min(float(spec["duration_ms"]) / 1000, 60.0))
-        if not ffmpeg:
-            manifest = dump({"fixture_render": True, "spec": spec}).encode()
-            output.with_suffix(".render.json").write_bytes(manifest)
-            return RenderResult(
-                str(output.with_suffix(".render.json")),
-                "manifest_fallback",
-                hashlib.sha256(manifest).hexdigest(),
-                {
-                    "valid": False,
-                    "probe_method": "manifest_fallback",
-                    "duration_ms": 0,
-                    "width": 0,
-                    "height": 0,
-                    "has_audio": False,
-                },
+        with TemporaryDirectory(prefix="alpha-render-") as directory, ExitStack() as stack:
+            workdir = Path(directory)
+            output = workdir / f"{variant_id}.mp4"
+            ffmpeg = self._ffmpeg()
+            duration = max(1.0, min(float(spec["duration_ms"]) / 1000, 60.0))
+            if not ffmpeg:
+                manifest = dump({"fixture_render": True, "spec": spec}).encode()
+                uri = self.storage.put_bytes(
+                    f"renders/{campaign_id}/{variant_id}.render.json",
+                    manifest,
+                    "application/json",
+                )
+                return RenderResult(
+                    uri,
+                    "manifest_fallback",
+                    hashlib.sha256(manifest).hexdigest(),
+                    {
+                        "valid": False,
+                        "probe_method": "manifest_fallback",
+                        "duration_ms": 0,
+                        "width": 0,
+                        "height": 0,
+                        "has_audio": False,
+                    },
+                )
+            command = [ffmpeg, "-hide_banner", "-loglevel", "error"]
+            source_asset = spec.get("source_asset_uri")
+            source_probe = spec.get("source_probe", {})
+            filters: list[str] = []
+            source_path = (
+                stack.enter_context(self.storage.materialize(source_asset))
+                if source_asset and self.storage.exists(source_asset)
+                else None
             )
-        command = [ffmpeg, "-hide_banner", "-loglevel", "error"]
-        source_asset = spec.get("source_asset_uri")
-        source_probe = spec.get("source_probe", {})
-        filters: list[str] = []
-        if source_asset and Path(source_asset).exists():
-            command += [
-                "-ss",
-                f"{max(0, int(spec['start_ms'])) / 1000:.3f}",
-                "-i",
-                str(source_asset),
-            ]
-            crop = spec.get("crop", {}).get("adjustment", "center")
-            x = "0" if crop == "left" else ("in_w-out_w" if crop == "right" else "(in_w-out_w)/2")
-            y = "0" if crop == "up" else ("in_h-out_h" if crop == "down" else "(in_h-out_h)/2")
-            filters.append(
-                "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
-                f"crop=720:1280:x={x}:y={y}[base]"
-            )
-            base_label = "base"
-            if source_probe.get("has_audio"):
-                audio_map = "0:a:0?"
-                next_input = 1
+            if source_path:
+                command += [
+                    "-ss",
+                    f"{max(0, int(spec['start_ms'])) / 1000:.3f}",
+                    "-i",
+                    str(source_path),
+                ]
+                crop = spec.get("crop", {}).get("adjustment", "center")
+                x = (
+                    "0"
+                    if crop == "left"
+                    else ("in_w-out_w" if crop == "right" else "(in_w-out_w)/2")
+                )
+                y = "0" if crop == "up" else ("in_h-out_h" if crop == "down" else "(in_h-out_h)/2")
+                filters.append(
+                    "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
+                    f"crop=720:1280:x={x}:y={y}[base]"
+                )
+                base_label = "base"
+                if source_probe.get("has_audio"):
+                    audio_map = "0:a:0?"
+                    next_input = 1
+                else:
+                    command += [
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        f"anullsrc=channel_layout=stereo:sample_rate=48000:d={duration}",
+                    ]
+                    audio_map = "1:a"
+                    next_input = 2
+                renderer_name = "ffmpeg_authorised_source"
             else:
                 command += [
                     "-f",
                     "lavfi",
                     "-i",
-                    f"anullsrc=channel_layout=stereo:sample_rate=48000:d={duration}",
+                    f"color=c=0x172033:s=720x1280:r=24:d={duration}",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    f"sine=frequency=440:sample_rate=48000:duration={duration}",
                 ]
+                base_label = "0:v"
                 audio_map = "1:a"
                 next_input = 2
-            renderer_name = "ffmpeg_authorised_source"
-        else:
-            command += [
-                "-f",
-                "lavfi",
-                "-i",
-                f"color=c=0x172033:s=720x1280:r=24:d={duration}",
-                "-f",
-                "lavfi",
-                "-i",
-                f"sine=frequency=440:sample_rate=48000:duration={duration}",
-            ]
-            base_label = "0:v"
-            audio_map = "1:a"
-            next_input = 2
-            renderer_name = "ffmpeg_fixture"
-        watermark = spec.get("watermark")
-        captions = spec.get("captions", {})
-        if captions.get("enabled"):
-            caption_text = str(captions.get("text") or "ALPHA captions")[:110]
-            caption_text = (
-                caption_text.replace("\\", "\\\\")
-                .replace("'", "\\'")
-                .replace(":", "\\:")
-                .replace("%", "\\%")
-                .replace("\n", " ")
-            )
-            filters.append(
-                f"[{base_label}]drawtext=text='{caption_text}':fontcolor=white:fontsize=30:"
-                "box=1:boxcolor=black@0.65:boxborderw=16:x=(w-text_w)/2:y=h-220[captioned]"
-            )
-            base_label = "captioned"
-        headline = spec.get("headline", {})
-        if headline.get("enabled") and headline.get("text"):
-            headline_text = (
-                str(headline["text"])[:80]
-                .replace("\\", "\\\\")
-                .replace("'", "\\'")
-                .replace(":", "\\:")
-                .replace("%", "\\%")
-            )
-            filters.append(
-                f"[{base_label}]drawtext=text='{headline_text}':fontcolor=white:fontsize=46:"
-                "box=1:boxcolor=black@0.72:boxborderw=18:x=(w-text_w)/2:y=120[headlined]"
-            )
-            base_label = "headlined"
-        if watermark and watermark.get("enabled", True):
-            configured_asset = watermark.get("asset_uri")
-            asset = Path(configured_asset) if configured_asset else None
-            if not asset or not asset.exists():
-                asset = self._watermark_ppm(f"renders/{campaign_id}/{variant_id}-watermark.ppm")
-            x, y = self._overlay(
-                watermark.get("position", "bottom_right"), int(watermark.get("padding", 24))
-            )
-            size = max(40, math.floor(720 * float(watermark.get("size_pct", 0.18))))
-            opacity = float(watermark.get("opacity", 0.85))
-            command += ["-i", str(asset)]
-            filters.extend(
-                [
-                    f"[{next_input}:v]scale={size}:-1,format=rgba,colorchannelmixer=aa={opacity}[wm]",
-                    f"[{base_label}][wm]overlay={x}:{y}[v]",
+                renderer_name = "ffmpeg_fixture"
+            watermark = spec.get("watermark")
+            captions = spec.get("captions", {})
+            if captions.get("enabled"):
+                caption_text = str(captions.get("text") or "ALPHA captions")[:110]
+                caption_text = (
+                    caption_text.replace("\\", "\\\\")
+                    .replace("'", "\\'")
+                    .replace(":", "\\:")
+                    .replace("%", "\\%")
+                    .replace("\n", " ")
+                )
+                filters.append(
+                    f"[{base_label}]drawtext=text='{caption_text}':fontcolor=white:fontsize=30:"
+                    "box=1:boxcolor=black@0.65:boxborderw=16:x=(w-text_w)/2:y=h-220[captioned]"
+                )
+                base_label = "captioned"
+            headline = spec.get("headline", {})
+            if headline.get("enabled") and headline.get("text"):
+                headline_text = (
+                    str(headline["text"])[:80]
+                    .replace("\\", "\\\\")
+                    .replace("'", "\\'")
+                    .replace(":", "\\:")
+                    .replace("%", "\\%")
+                )
+                filters.append(
+                    f"[{base_label}]drawtext=text='{headline_text}':fontcolor=white:fontsize=46:"
+                    "box=1:boxcolor=black@0.72:boxborderw=18:x=(w-text_w)/2:y=120[headlined]"
+                )
+                base_label = "headlined"
+            if watermark and watermark.get("enabled", True):
+                configured_asset = watermark.get("asset_uri")
+                asset = (
+                    stack.enter_context(self.storage.materialize(configured_asset))
+                    if configured_asset and self.storage.exists(configured_asset)
+                    else self._watermark_ppm(workdir / f"{variant_id}-watermark.ppm")
+                )
+                x, y = self._overlay(
+                    watermark.get("position", "bottom_right"), int(watermark.get("padding", 24))
+                )
+                size = max(40, math.floor(720 * float(watermark.get("size_pct", 0.18))))
+                opacity = float(watermark.get("opacity", 0.85))
+                command += ["-i", str(asset)]
+                filters.extend(
+                    [
+                        f"[{next_input}:v]scale={size}:-1,format=rgba,colorchannelmixer=aa={opacity}[wm]",
+                        f"[{base_label}][wm]overlay={x}:{y}[v]",
+                    ]
+                )
+                command += [
+                    "-filter_complex",
+                    ";".join(filters),
+                    "-map",
+                    "[v]",
+                    "-map",
+                    audio_map,
                 ]
+            elif filters:
+                filters.append(f"[{base_label}]null[v]")
+                command += [
+                    "-filter_complex",
+                    ";".join(filters),
+                    "-map",
+                    "[v]",
+                    "-map",
+                    audio_map,
+                ]
+            else:
+                command += ["-map", "0:v", "-map", audio_map]
+            command += [
+                "-t",
+                f"{duration:.3f}",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-movflags",
+                "+faststart",
+                "-fflags",
+                "+bitexact",
+                "-flags:v",
+                "+bitexact",
+                "-flags:a",
+                "+bitexact",
+                "-threads",
+                "1",
+                "-metadata",
+                "creation_time=1970-01-01T00:00:00Z",
+                "-y",
+                str(output),
+            ]
+            subprocess.run(command, check=True, timeout=90, capture_output=True)
+            content = output.read_bytes()
+            probe = self.probe_media(output)
+            uri = self.storage.put_file(
+                f"renders/{campaign_id}/{variant_id}.mp4", output, "video/mp4"
             )
-            command += [
-                "-filter_complex",
-                ";".join(filters),
-                "-map",
-                "[v]",
-                "-map",
-                audio_map,
-            ]
-        elif filters:
-            filters.append(f"[{base_label}]null[v]")
-            command += [
-                "-filter_complex",
-                ";".join(filters),
-                "-map",
-                "[v]",
-                "-map",
-                audio_map,
-            ]
-        else:
-            command += ["-map", "0:v", "-map", audio_map]
-        command += [
-            "-t",
-            f"{duration:.3f}",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            "-movflags",
-            "+faststart",
-            "-fflags",
-            "+bitexact",
-            "-flags:v",
-            "+bitexact",
-            "-flags:a",
-            "+bitexact",
-            "-threads",
-            "1",
-            "-metadata",
-            "creation_time=1970-01-01T00:00:00Z",
-            "-y",
-            str(output),
-        ]
-        subprocess.run(command, check=True, timeout=90, capture_output=True)
-        content = output.read_bytes()
-        probe = self.probe_media(output)
-        return RenderResult(str(output), renderer_name, hashlib.sha256(content).hexdigest(), probe)
+            return RenderResult(uri, renderer_name, hashlib.sha256(content).hexdigest(), probe)
 
 
 def decode_upload(data_base64: str) -> bytes:
