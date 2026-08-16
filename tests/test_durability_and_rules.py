@@ -53,7 +53,7 @@ def test_worker_recovers_expired_lease_and_resumes_completed_stages(client, app)
         "WHERE job_id=? AND status='completed' GROUP BY stage",
         (job["id"],),
     )
-    assert len(completed_after) == 11
+    assert len(completed_after) == len(pipeline.stage_handlers)
     assert all(row["n"] == 1 for row in completed_after)
     assert (
         app.state.db.one(

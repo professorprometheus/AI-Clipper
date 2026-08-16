@@ -13,11 +13,13 @@ from .config import Settings
 from .db import Database, dump, load, now, uid
 from .domain import (
     DEFAULT_WEIGHTS,
+    analyse_enrichment_features,
     candidate_scores,
     cluster_observations,
     cosine,
     deterministic_qa,
     embedding,
+    enrichment_suitability,
     infer_style,
     research_signals,
     weighted_score,
@@ -54,6 +56,7 @@ STAGES = [
     "synthesize_strategy",
     "discover_candidates",
     "rank_candidates",
+    "plan_enrichment",
     "render",
     "qa",
     "review_ready",
@@ -153,6 +156,7 @@ class Pipeline:
             "synthesize_strategy": self.synthesize_strategy,
             "discover_candidates": self.discover_candidates,
             "rank_candidates": self.rank_candidates,
+            "plan_enrichment": self.plan_enrichment,
             "render": self.render,
             "qa": self.qa,
             "review_ready": self.review_ready,
@@ -673,6 +677,7 @@ class Pipeline:
             analysis = self.providers.ai.analyse_example(enriched, index)
             if evidence:
                 analysis["live_evidence"] = evidence["raw"]
+            analysis["enrichment_features"] = analyse_enrichment_features(analysis)
             self.db.execute(
                 "UPDATE successful_examples SET transcript=?,analysis_json=? WHERE id=?",
                 (
@@ -992,7 +997,8 @@ class Pipeline:
                 self.db.execute(
                     "INSERT INTO candidate_moments(id,campaign_id,source_item_id,start_ms,end_ms,transcript,"
                     "discovery_pass,research_match_json,evidence_ids_json,scores_json,selection_reason,saturation_json,"
-                    "predicted_score,policy_id,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                    "predicted_score,policy_id,status,enrichment_suitability_json) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
                     "ON CONFLICT DO NOTHING",
                     (
                         candidate_id,
@@ -1015,6 +1021,7 @@ class Pipeline:
                         predicted,
                         applied_policy["id"],
                         "discovered",
+                        dump(enrichment_suitability(segment["text"])),
                     ),
                 )
                 stored_candidate = self.db.one(
@@ -1074,10 +1081,23 @@ class Pipeline:
                 ),
                 reverse=True,
             )
-        for index, candidate in enumerate(candidates):
+        selected_ids = {candidate["id"] for candidate in candidates[:3]}
+        if len(candidates) > 3:
+            # Preserve one distinct creative opportunity instead of selecting three
+            # near-identical top-score moments.
+            diverse = max(
+                candidates[2:],
+                key=lambda row: (
+                    float(load(row["scores_json"], {}).get("humour", 0)),
+                    float(row["predicted_score"]),
+                ),
+            )
+            selected_ids.discard(candidates[2]["id"])
+            selected_ids.add(diverse["id"])
+        for candidate in candidates:
             self.db.execute(
                 "UPDATE candidate_moments SET status=? WHERE id=?",
-                ("selected" if index < 3 else "ranked", candidate["id"]),
+                ("selected" if candidate["id"] in selected_ids else "ranked", candidate["id"]),
             )
         if not candidates:
             raise ValueError("no candidate moments discovered")
@@ -1091,6 +1111,427 @@ class Pipeline:
                 "runner_up": load(candidates[1]["scores_json"]) if len(candidates) > 1 else None,
             },
         }
+
+    def _eligible_assets(self, campaign_id: str, controls: dict[str, Any]) -> list[dict[str, Any]]:
+        prohibited = set(controls.get("prohibited_asset_types", []))
+        required_source = str(controls.get("required_asset_source") or "").lower().strip()
+        assets = []
+        for row in self.db.all(
+            "SELECT * FROM assets WHERE (campaign_id=? OR campaign_id IS NULL) "
+            "AND permitted_commercial_use=1 ORDER BY created_at",
+            (campaign_id,),
+        ):
+            if row["asset_type"] in prohibited or not self.providers.storage.exists(
+                row["file_uri"]
+            ):
+                continue
+            restrictions = load(row["campaign_restrictions_json"], {})
+            if campaign_id in restrictions.get("prohibited_campaign_ids", []):
+                continue
+            allowed_campaigns = restrictions.get("campaign_ids", [])
+            if allowed_campaigns and campaign_id not in allowed_campaigns:
+                continue
+            source_haystack = " ".join(
+                [
+                    row["licence"],
+                    row.get("source_url") or "",
+                    load(row["metadata_json"], {}).get("library", ""),
+                ]
+            ).lower()
+            if required_source and required_source not in source_haystack:
+                continue
+            row["tags"] = load(row["tags_json"], [])
+            row["embedding"] = load(row["embedding_json"], [])
+            row["metadata"] = load(row["metadata_json"], {})
+            row["campaign_restrictions"] = restrictions
+            assets.append(row)
+        return assets
+
+    @staticmethod
+    def _asset_allowed(asset: dict[str, Any], controls: dict[str, Any]) -> bool:
+        asset_type = asset["asset_type"]
+        media_kind = asset.get("metadata", {}).get("probe", {}).get("media_kind")
+        if asset_type == "music":
+            return bool(controls.get("music_allowed"))
+        if asset_type == "sfx":
+            return bool(controls.get("sound_effects_allowed"))
+        if asset_type == "broll":
+            return bool(controls.get("broll_allowed")) and (
+                bool(controls.get("external_video_allowed"))
+                if media_kind == "video"
+                else bool(controls.get("external_images_allowed"))
+            )
+        if asset_type in {"meme_image", "meme_video", "reaction"}:
+            return bool(controls.get("memes_allowed")) and (
+                bool(controls.get("external_video_allowed"))
+                if media_kind == "video" or asset_type == "meme_video"
+                else bool(controls.get("external_images_allowed"))
+            )
+        if asset_type in {"image", "graphic"}:
+            return bool(controls.get("external_images_allowed"))
+        return False
+
+    def _select_asset(
+        self,
+        assets: list[dict[str, Any]],
+        asset_types: set[str],
+        text: str,
+        controls: dict[str, Any],
+        used: set[str],
+    ) -> dict[str, Any] | None:
+        query = embedding(text)
+        choices = [
+            asset
+            for asset in assets
+            if asset["asset_type"] in asset_types
+            and asset["id"] not in used
+            and self._asset_allowed(asset, controls)
+        ]
+        return max(choices, key=lambda asset: cosine(asset["embedding"], query), default=None)
+
+    def _event_from_asset(
+        self,
+        asset: dict[str, Any],
+        start_ms: int,
+        duration_ms: int,
+        mode: str,
+        purpose: str,
+        reason: str,
+        parameters: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "id": stable_id(f"{asset['id']}:{start_ms}:{purpose}", 20),
+            "type": asset["asset_type"],
+            "asset_id": asset["id"],
+            "asset_uri": asset["file_uri"],
+            "title": asset["title"],
+            "media_kind": asset.get("metadata", {}).get("probe", {}).get("media_kind", "image"),
+            "start_ms": start_ms,
+            "duration_ms": duration_ms,
+            "mode": mode,
+            "purpose": purpose,
+            "reason": reason,
+            "parameters": parameters or {},
+            "provenance": {
+                "licence": asset["licence"],
+                "permitted_commercial_use": bool(asset["permitted_commercial_use"]),
+                "attribution_requirement": asset.get("attribution_requirement"),
+                "attribution_text": asset.get("attribution_requirement"),
+                "source_url": asset.get("source_url"),
+                "library": asset.get("metadata", {}).get("library"),
+                "campaign_restrictions": asset.get("campaign_restrictions", {}),
+                "rights_attestation": asset["rights_attestation"],
+            },
+            "storage_verified": self.providers.storage.exists(asset["file_uri"]),
+        }
+
+    def build_enrichment_plan(
+        self, campaign_id: str, candidate: dict[str, Any], version: int = 1
+    ) -> dict[str, Any]:
+        campaign = self._campaign(campaign_id)
+        controls = load(campaign.get("enrichment_config_json"), {})
+        defaults = {
+            "music_allowed": False,
+            "memes_allowed": False,
+            "broll_allowed": False,
+            "sound_effects_allowed": False,
+            "external_images_allowed": False,
+            "external_video_allowed": False,
+            "prohibited_asset_types": [],
+            "max_inserts": 0,
+            "max_insert_duration_seconds": 2.0,
+            "music_volume_min_db": -30.0,
+            "music_volume_max_db": -12.0,
+            "ducking_required": True,
+            "additional_instructions": "",
+        }
+        controls = {**defaults, **controls}
+        suitability = load(candidate.get("enrichment_suitability_json"), {})
+        assets = self._eligible_assets(campaign_id, controls)
+        events: list[dict[str, Any]] = []
+        used: set[str] = set()
+        duration_ms = max(1000, candidate["end_ms"] - candidate["start_ms"])
+        max_insert_ms = round(float(controls["max_insert_duration_seconds"]) * 1000)
+        max_inserts = int(controls["max_inserts"])
+
+        music_signal = suitability.get("music_suitability", {}).get("value")
+        music = self._select_asset(assets, {"music"}, candidate["transcript"], controls, used)
+        if music and music_signal is not None and music_signal >= 0.5:
+            volume_db = min(-18.0, float(controls["music_volume_max_db"]))
+            volume_db = max(volume_db, float(controls["music_volume_min_db"]))
+            events.append(
+                self._event_from_asset(
+                    music,
+                    0,
+                    duration_ms,
+                    "background",
+                    "enhance emotional tone without masking speech",
+                    "candidate emotional-language signal and campaign-authorised music",
+                    {
+                        "volume_db": volume_db,
+                        "loop": True,
+                        "fade_in_ms": min(750, duration_ms // 4),
+                        "fade_out_ms": min(750, duration_ms // 4),
+                        "ducking": bool(controls["ducking_required"]),
+                    },
+                )
+            )
+            used.add(music["id"])
+
+        humour_signal = suitability.get("humour_insert_opportunity", {}).get("value")
+        meme = self._select_asset(
+            assets,
+            {"meme_image", "meme_video", "reaction"},
+            candidate["transcript"],
+            controls,
+            used,
+        )
+        if meme and max_inserts > 0 and humour_signal is not None and humour_signal >= 0.7:
+            start = min(max(500, duration_ms // 3), max(0, duration_ms - 750))
+            event_duration = min(
+                max_insert_ms, meme.get("duration_ms") or 1200, duration_ms - start
+            )
+            events.append(
+                self._event_from_asset(
+                    meme,
+                    start,
+                    max(250, event_duration),
+                    "overlay",
+                    "reinforce a humorous or absurd beat",
+                    "semantic match to humour language in the timestamped moment",
+                )
+            )
+            used.add(meme["id"])
+
+        context_signal = suitability.get("broll_suitability", {}).get("value")
+        broll = self._select_asset(assets, {"broll"}, candidate["transcript"], controls, used)
+        external_inserts = sum(event["type"] != "music" for event in events)
+        if (
+            broll
+            and external_inserts < max_inserts
+            and context_signal is not None
+            and context_signal >= 0.7
+        ):
+            start = min(max(1000, duration_ms * 2 // 3), max(0, duration_ms - 1000))
+            event_duration = min(
+                max_insert_ms, broll.get("duration_ms") or 1500, duration_ms - start
+            )
+            events.append(
+                self._event_from_asset(
+                    broll,
+                    start,
+                    max(250, event_duration),
+                    "picture_in_picture",
+                    "visually illustrate a contextual claim",
+                    "semantic match to explanatory language in the timestamped moment",
+                )
+            )
+            used.add(broll["id"])
+
+        sfx = self._select_asset(assets, {"sfx"}, candidate["transcript"], controls, used)
+        external_inserts = sum(event["type"] != "music" for event in events)
+        if (
+            sfx
+            and external_inserts < max_inserts
+            and humour_signal is not None
+            and humour_signal >= 0.7
+        ):
+            sfx_duration = min(max_insert_ms, sfx.get("duration_ms") or 750, duration_ms)
+            events.append(
+                self._event_from_asset(
+                    sfx,
+                    max(0, duration_ms - sfx_duration),
+                    sfx_duration,
+                    "audio_emphasis",
+                    "punctuate the humorous payoff",
+                    "humour signal and a semantically matched authorised sound effect",
+                    {"volume_db": -10.0},
+                )
+            )
+            used.add(sfx["id"])
+
+        enabled = any(
+            controls.get(key)
+            for key in (
+                "music_allowed",
+                "memes_allowed",
+                "broll_allowed",
+                "sound_effects_allowed",
+                "external_images_allowed",
+                "external_video_allowed",
+            )
+        )
+        if (
+            enabled
+            and suitability.get("humour_insert_opportunity", {}).get("status") != "unavailable"
+        ):
+            events.append(
+                {
+                    "id": stable_id(f"{candidate['id']}:punch-in:{version}", 20),
+                    "type": "punch_in",
+                    "start_ms": min(500, max(0, duration_ms - 750)),
+                    "duration_ms": min(1000, duration_ms),
+                    "mode": "native",
+                    "purpose": "emphasise the opening hook",
+                    "reason": "native emphasis is rights-safe and the hook is a high-attention moment",
+                    "parameters": {"scale": 1.12},
+                }
+            )
+
+        strategy = self._enrichment_strategy(events, duration_ms)
+        return {
+            "planner": "local_evidence_enrichment_v1",
+            "candidate_id": candidate["id"],
+            "version": version,
+            "warranted": bool(events),
+            "decision_reason": (
+                "Campaign permissions, candidate signals and authorised semantic asset matches supported this plan."
+                if events
+                else "No permitted evidence-backed enrichment was warranted."
+            ),
+            "controls": controls,
+            "suitability": suitability,
+            "events": sorted(events, key=lambda event: event["start_ms"]),
+            "strategy_features": strategy,
+        }
+
+    @staticmethod
+    def _enrichment_strategy(events: list[dict[str, Any]], duration_ms: int) -> dict[str, Any]:
+        duration_units = max(0.1, duration_ms / 10_000)
+        return {
+            "music": any(event["type"] == "music" for event in events),
+            "meme": any(
+                event["type"] in {"meme_image", "meme_video", "reaction"} for event in events
+            ),
+            "broll_density_per_10s": round(
+                sum(event["type"] == "broll" for event in events) / duration_units, 3
+            ),
+            "zoom_frequency_per_10s": round(
+                sum(
+                    event["type"] in {"punch_in", "dynamic_crop", "speaker_focus"}
+                    for event in events
+                )
+                / duration_units,
+                3,
+            ),
+            "sfx_frequency_per_10s": round(
+                sum(event["type"] == "sfx" for event in events) / duration_units, 3
+            ),
+            "reaction_insert_timing_ms": [
+                int(event.get("start_ms", 0))
+                for event in events
+                if event.get("type") in {"meme_image", "meme_video", "reaction"}
+            ],
+        }
+
+    def revise_enrichment_spec(
+        self,
+        campaign_id: str,
+        candidate: dict[str, Any],
+        spec: dict[str, Any],
+        changes: dict[str, Any],
+        version: int,
+    ) -> dict[str, Any]:
+        """Apply asset-aware review changes while preserving the immutable parent plan."""
+        if changes.get("enrichment_regenerate"):
+            plan = self.build_enrichment_plan(campaign_id, candidate, version)
+            return {**spec, "enrichment": plan}
+
+        plan = spec.setdefault("enrichment", {})
+        controls = plan.get("controls", {})
+        events = plan.setdefault("events", [])
+        assets = self._eligible_assets(campaign_id, controls)
+        used = {event.get("asset_id") for event in events if event.get("asset_id")}
+        duration_ms = max(1000, int(spec.get("duration_ms", 1000)))
+
+        replace_type = changes.get("enrichment_replace_asset_type")
+        if replace_type:
+            replace_types = (
+                {"meme_image", "meme_video", "reaction"}
+                if replace_type == "meme"
+                else {replace_type}
+            )
+            replaced = next((event for event in events if event.get("type") in replace_types), None)
+            if replaced:
+                used.discard(replaced.get("asset_id"))
+                replacement = self._select_asset(
+                    assets, replace_types, candidate["transcript"], controls, used
+                )
+                if replacement:
+                    events[events.index(replaced)] = self._event_from_asset(
+                        replacement,
+                        int(replaced.get("start_ms", 0)),
+                        int(replaced.get("duration_ms", duration_ms)),
+                        str(replaced.get("mode", "background")),
+                        str(replaced.get("purpose", "human-requested replacement")),
+                        "replacement requested during human review",
+                        replaced.get("parameters", {}),
+                    )
+
+        request_type = changes.get("enrichment_request_asset_type")
+        external_types = {"broll", "meme_image", "meme_video", "reaction", "image", "graphic"}
+        insert_count = sum(event.get("type") in external_types for event in events)
+        if request_type and insert_count < int(controls.get("max_inserts", 0)):
+            addition = self._select_asset(
+                assets, {request_type}, candidate["transcript"], controls, used
+            )
+            if not addition:
+                addition = self._select_asset(
+                    assets, {request_type}, candidate["transcript"], controls, set()
+                )
+            if addition:
+                max_duration = round(float(controls.get("max_insert_duration_seconds", 2.0)) * 1000)
+                event_duration = min(max_duration, addition.get("duration_ms") or 1500, duration_ms)
+                start = max(0, duration_ms - event_duration)
+                events.append(
+                    self._event_from_asset(
+                        addition,
+                        start,
+                        event_duration,
+                        "picture_in_picture",
+                        "add visual context",
+                        "additional B-roll requested during human review",
+                    )
+                )
+
+        plan["version"] = version
+        plan["events"] = sorted(events, key=lambda event: int(event.get("start_ms", 0)))
+        plan["strategy_features"] = self._enrichment_strategy(plan["events"], duration_ms)
+        plan["decision_reason"] = "Plan revised from explicit human review instructions."
+        spec.setdefault("metadata", {})["enrichment_strategy"] = plan["strategy_features"]
+        return spec
+
+    def plan_enrichment(self, campaign_id: str, job_id: str) -> dict[str, Any]:
+        candidates = self.db.all(
+            "SELECT * FROM candidate_moments WHERE campaign_id=? AND status='selected' "
+            "ORDER BY predicted_score DESC",
+            (campaign_id,),
+        )
+        event_count = 0
+        for candidate in candidates:
+            existing = self.db.one(
+                "SELECT id,plan_json FROM enrichment_plans WHERE candidate_id=? AND version=1",
+                (candidate["id"],),
+            )
+            if existing:
+                event_count += len(load(existing["plan_json"], {}).get("events", []))
+                continue
+            plan = self.build_enrichment_plan(campaign_id, candidate)
+            self.db.execute(
+                "INSERT INTO enrichment_plans(id,campaign_id,candidate_id,version,plan_json,"
+                "strategy_features_json,created_at) VALUES (?,?,?,?,?,?,?)",
+                (
+                    uid(),
+                    campaign_id,
+                    candidate["id"],
+                    1,
+                    dump(plan),
+                    dump(plan["strategy_features"]),
+                    now(),
+                ),
+            )
+            event_count += len(plan["events"])
+        return {"plans": len(candidates), "events": event_count, "planner": "evidence_driven_v1"}
 
     def render(self, campaign_id: str, job_id: str) -> dict[str, Any]:
         campaign = self._campaign(campaign_id)
@@ -1125,6 +1566,29 @@ class Pipeline:
                     (candidate["id"],),
                 )
                 continue
+            plan_row = self.db.one(
+                "SELECT * FROM enrichment_plans WHERE candidate_id=? AND version=1",
+                (candidate["id"],),
+            )
+            if plan_row:
+                enrichment_plan = load(plan_row["plan_json"], {})
+                enrichment_plan_id = plan_row["id"]
+            else:
+                enrichment_plan = self.build_enrichment_plan(campaign_id, candidate)
+                enrichment_plan_id = uid()
+                self.db.execute(
+                    "INSERT INTO enrichment_plans(id,campaign_id,candidate_id,version,plan_json,"
+                    "strategy_features_json,created_at) VALUES (?,?,?,?,?,?,?)",
+                    (
+                        enrichment_plan_id,
+                        campaign_id,
+                        candidate["id"],
+                        1,
+                        dump(enrichment_plan),
+                        dump(enrichment_plan["strategy_features"]),
+                        now(),
+                    ),
+                )
             spec = {
                 "source_item_id": candidate["source_item_id"],
                 "source_asset_uri": source_metadata.get("asset_uri"),
@@ -1147,13 +1611,19 @@ class Pipeline:
                 "headline": {"enabled": False, "text": ""},
                 "crop": {"mode": "center", "adjustment": "center"},
                 "audio": {"normalise": True},
-                "metadata": {"campaign_id": campaign_id},
+                "enrichment": {**enrichment_plan, "plan_id": enrichment_plan_id},
+                "metadata": {
+                    "campaign_id": campaign_id,
+                    "enrichment_strategy": enrichment_plan["strategy_features"],
+                },
             }
             result = self.providers.renderer.render(campaign_id, variant_id, spec)
             spec["render"] = {
                 "renderer": result.renderer,
                 "sha256": result.sha256,
                 "probe": result.probe,
+                "file_uri": result.file_uri,
+                "storage_verified": self.providers.storage.exists(result.file_uri),
             }
             self.db.execute(
                 "INSERT INTO clip_variants(id,candidate_id,parent_id,style_profile_id,version,render_spec_json,file_uri,"

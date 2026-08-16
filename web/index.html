@@ -42,6 +42,32 @@ https://example.com/clips/winner-2
 https://example.com/clips/winner-3</textarea></label>
           <label>Research seeds <span>one topic, keyword, or account per line</span><textarea name="seeds" rows="3">creator growth
 attention hooks</textarea></label>
+          <label>Raw campaign brief <span>paste the original rules and creative direction; structured controls are enforced separately</span><textarea name="raw_brief" rows="5" placeholder="Campaign objective, audience, mandatory language and creative direction"></textarea></label>
+          <fieldset><legend>Creative enrichment controls</legend><p class="muted">Optional media is denied by default. Enable only what this campaign permits.</p><div class="form-grid">
+            <label class="check"><input name="music_allowed" type="checkbox"> Music allowed</label>
+            <label class="check"><input name="memes_allowed" type="checkbox"> Memes/reactions allowed</label>
+            <label class="check"><input name="broll_allowed" type="checkbox"> B-roll allowed</label>
+            <label class="check"><input name="sound_effects_allowed" type="checkbox"> Sound effects allowed</label>
+            <label class="check"><input name="external_images_allowed" type="checkbox"> External images allowed</label>
+            <label class="check"><input name="external_video_allowed" type="checkbox"> External video allowed</label>
+            <label>Required asset source<input name="required_asset_source" placeholder="Optional library or licence name"></label>
+            <label>Prohibited asset types<input name="prohibited_asset_types" placeholder="e.g. reaction, sfx"></label>
+            <label>Maximum inserts<input name="max_inserts" type="number" min="0" max="20" value="3"></label>
+            <label>Maximum insert duration (seconds)<input name="max_insert_duration_seconds" type="number" min="0.1" max="30" step="0.1" value="2"></label>
+            <label>Music minimum volume (dB)<input name="music_volume_min_db" type="number" min="-60" max="0" value="-30"></label>
+            <label>Music maximum volume (dB)<input name="music_volume_max_db" type="number" min="-60" max="0" value="-12"></label>
+            <label class="check"><input name="ducking_required" type="checkbox" checked> Duck music beneath speech</label>
+          </div><label>Additional enrichment instructions<textarea name="enrichment_instructions" rows="3" placeholder="Use restraint; reserve reactions for explicit punchlines"></textarea></label></fieldset>
+          <fieldset><legend>Authorised enrichment asset library</legend><p class="muted">Optional campaign assets are uploaded before submission with rights and licence provenance.</p><div class="form-grid">
+            <label>Music bed<input name="music_asset" type="file" accept="audio/*,.wav,.mp3,.m4a,.ogg,.flac"></label>
+            <label>Meme/reaction image<input name="meme_asset" type="file" accept="image/*,.ppm"></label>
+            <label>B-roll clip or image<input name="broll_asset" type="file" accept="video/*,image/*,.ppm"></label>
+            <label>Licence/source<input name="asset_licence" value="User-owned campaign asset"></label>
+            <label>Source URL<input name="asset_source_url" type="url" placeholder="Optional provenance URL"></label>
+            <label>Semantic tags<input name="asset_tags" value="campaign, authorised" placeholder="comma-separated"></label>
+            <label class="check"><input name="asset_commercial" type="checkbox"> Commercial use is permitted</label>
+            <label class="check"><input name="asset_rights" type="checkbox"> I confirm usage rights for every selected asset</label>
+          </div></fieldset>
           <fieldset><legend>Deterministic branding</legend><div class="form-grid">
             <label class="check"><input name="watermark_required" type="checkbox" checked> Watermark required</label>
             <label>Watermark asset<input name="watermark_file" type="file" accept="image/png,image/jpeg,image/webp,.ppm"></label>

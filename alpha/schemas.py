@@ -45,6 +45,34 @@ class WatermarkInput(BaseModel):
     size_pct: float = Field(default=0.18, gt=0.01, le=1.0)
 
 
+AssetType = Literal[
+    "music", "meme_image", "meme_video", "reaction", "broll", "sfx", "image", "graphic"
+]
+
+
+class EnrichmentControls(BaseModel):
+    music_allowed: bool = False
+    memes_allowed: bool = False
+    broll_allowed: bool = False
+    sound_effects_allowed: bool = False
+    external_images_allowed: bool = False
+    external_video_allowed: bool = False
+    required_asset_source: str | None = Field(default=None, max_length=500)
+    prohibited_asset_types: list[AssetType] = Field(default_factory=list)
+    max_inserts: int = Field(default=0, ge=0, le=20)
+    max_insert_duration_seconds: float = Field(default=2.0, gt=0, le=30)
+    music_volume_min_db: float = Field(default=-30.0, ge=-60, le=0)
+    music_volume_max_db: float = Field(default=-12.0, ge=-60, le=0)
+    ducking_required: bool = True
+    additional_instructions: str = Field(default="", max_length=10_000)
+
+    @model_validator(mode="after")
+    def valid_volume_range(self) -> EnrichmentControls:
+        if self.music_volume_min_db > self.music_volume_max_db:
+            raise ValueError("music volume minimum must not exceed maximum")
+        return self
+
+
 class CampaignCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     owner_email: EmailStr
@@ -61,6 +89,8 @@ class CampaignCreate(BaseModel):
     successful_examples: list[ExampleInput] = Field(default_factory=list, max_length=500)
     requirements: list[RequirementInput] = Field(default_factory=list, max_length=200)
     watermark: WatermarkInput | None = None
+    raw_brief: str = Field(default="", max_length=100_000)
+    enrichment: EnrichmentControls = Field(default_factory=EnrichmentControls)
 
     @field_validator("currency")
     @classmethod

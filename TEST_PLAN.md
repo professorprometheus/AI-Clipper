@@ -108,6 +108,16 @@ The test does not need to run for 72 wall-clock hours. It must prove the archite
 - `tests/test_domain.py`: structured edit parsing/application and strict separation of AI-evaluated requirements from deterministic QA.
 - `tests/test_external_persistence.py`: S3-compatible put/get/stream/materialise/delete contract, private bucket/key validation, disposable staging, real FFmpeg output recovered by a fresh adapter, Postgres URL/query-dialect selection and database state recovered after process-style reconstruction.
 
+## Creative enrichment coverage
+
+- `tests/test_enrichment.py`: campaign controls and raw brief, authorised music/meme/B-roll asset imports, licence/provenance and object-storage records.
+- `tests/test_enrichment.py`: persisted planning produces one candidate with music, meme, B-roll and punch-in; real FFmpeg output is probed, streamed and deterministic QA-passed.
+- `tests/test_enrichment.py`: the exact multi-action natural-language edit removes the meme, lowers music by 6 dB, adds a punch-in, renders a child, persists plan strategy features and leaves the parent byte-for-byte unchanged.
+- `tests/test_enrichment.py`: prohibited, commercially disallowed, unlicensed and missing enrichment objects block deterministic QA.
+- `tests/test_domain.py`: parsing and applying removal, volume, timing and native-event changes remains deterministic.
+
+Manual review smoke should confirm the campaign controls, authorised-asset intake and timestamped enrichment timeline are legible on desktop/mobile before a production campaign.
+
 ## Pending credentialled acceptance
 
 Automated contracts do not constitute live-provider completion. Before Build #2 is complete, execute one real campaign on the deployed service and retain evidence that:

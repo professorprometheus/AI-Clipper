@@ -251,3 +251,19 @@ App and worker containers can restart independently without losing jobs, provena
 
 Alternatives considered:
 Supabase Free Postgres is viable but pauses low-activity projects after seven days and its bundled object storage allowance is smaller. Railway becomes at least $1/month after its trial, Fly.io has no general free allowance for new accounts, and Cloudflare Workers Free has a 10 ms CPU limit that cannot render video. A continuously awake worker is unnecessary for the checkpointed V0 and would introduce avoidable cost.
+### ADR-014 — Rights-gated, versioned enrichment plans
+Status: Accepted
+
+Context:
+Short-form edits benefit from music, cutaways and visual emphasis, but automatic decoration can violate campaign rules, obscure speech, fabricate research findings or copy restricted media.
+
+Decision:
+Store raw briefs alongside fail-closed structured controls. Model external media as private Asset objects with explicit licence, commercial permission, attribution, restriction and rights provenance. Insert a persisted Enrichment Plan stage between ranking and rendering, use local semantic matching and timestamped suitability signals, and label successful-example features observed/inferred/unavailable. Treat native transforms as first-class render events. Store strategy features per immutable plan/version and create a new child plan for human changes.
+
+Consequences:
+No external asset is selected merely because it exists, unlicensed/prohibited media blocks deterministic QA, and stateless retries retain both decisions and files. The credential-free path uses FFmpeg and user-owned assets. Public metadata cannot establish edit-track details, and no bundled third-party meme/music catalogue is claimed.
+
+Alternatives considered:
+Random stock decoration, blind scraping, mutable event lists and AI-generated feature assertions were rejected because they weaken rights compliance, reproducibility and experimental validity.
+
+---

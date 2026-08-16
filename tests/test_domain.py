@@ -45,3 +45,22 @@ def test_ai_requirement_never_masquerades_as_deterministic_check():
     )
     assert report["passed"]
     assert all(check["key"] != "strong_hook" for check in report["checks"])
+
+
+def test_enrichment_edit_parser_covers_review_commands():
+    spec = {
+        "start_ms": 0,
+        "end_ms": 10_000,
+        "duration_ms": 10_000,
+        "enrichment": {"events": []},
+    }
+    assert parse_edit_instruction("less memes", spec)["enrichment_remove_types"] == [
+        "meme_image",
+        "meme_video",
+        "reaction",
+    ]
+    assert parse_edit_instruction("more B-roll", spec)["enrichment_request_asset_type"] == "broll"
+    assert parse_edit_instruction("change music", spec)["enrichment_replace_asset_type"] == "music"
+    assert parse_edit_instruction("regenerate enrichment", spec)["enrichment_regenerate"] is True
+    moved = parse_edit_instruction("move reaction to 4 seconds", spec)
+    assert moved["enrichment_move"] == {"types": ["reaction"], "start_ms": 4000}

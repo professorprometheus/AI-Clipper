@@ -1,7 +1,7 @@
 # ALPHA — Implementation Status
 
 Overall status: BUILD #2 NOT COMPLETE — LIVE ADAPTERS AND DEPLOYMENT ARE READY FOR CREDENTIALLED VALIDATION
-Last updated: 2026-08-15
+Last updated: 2026-08-17
 
 ## Phase status
 
@@ -14,14 +14,15 @@ Last updated: 2026-08-15
 | 4 Successful-example intelligence | Live metadata enrichment implemented; credentialled validation blocked | Supplied YouTube examples use Data API metadata/statistics; supplied TikTok examples use official public oEmbed. Evidence is retained alongside heuristic style analysis. Instagram enrichment requires approved Graph access. |
 | 5 Social research engine | Multi-source live adapter implemented; credentialled validation partial | Automatic YouTube search/statistics, optional approved TikTok Research API, optional Instagram professional-account hashtag research, TikTok oEmbed examples, GDELT with Google News RSS fallback, raw/derived separation and provider-event provenance. TikTok oEmbed and Google News RSS were exercised live; YouTube/TikTok Research/Instagram remain untested without credentials/approval. |
 | 6 Strategy + source matching | Complete | Evidence-backed StrategyBrief, two discovery passes across every SourceItem, versioned weighted scores and approved-source provenance. |
-| 7 Rendering + rule engine | Complete for rights-attested source media | FFmpeg cuts imported source timestamps, converts to 9:16 H.264/AAC, burns captions/headlines, applies uploaded/generated watermark controls, probes output and records render lineage. Production rendering stages object-store inputs/outputs in disposable temp directories, upload final clips under deterministic keys, and process sequentially. A fresh S3 adapter recovers a rendered clip after all local staging disappears. Live mode refuses synthetic stand-ins. |
-| 8 QA + review dashboard | Complete | Video/evidence/score/style/compliance display; approve/change/reject; deterministic failure blocks approval; audited rule revision re-evaluates QA and revokes invalid approvals; history retained. |
-| 9 Edit loop | Complete | Natural-language parser covers timing, caption/watermark size/position, crop, headline and context; child renders preserve parents. |
+| 7 Rendering + rule engine | Complete for rights-attested source and enrichment media | FFmpeg cuts imported source timestamps, converts to 9:16 H.264/AAC, and composes captions, watermark, authorised music/SFX/image/video inserts and native emphasis. Versioned evidence-backed Enrichment Plans precede renders; asset rights, campaign permissions, timings, object persistence and final streams are deterministic QA gates. Production staging is disposable and outputs use private object storage. Live mode refuses synthetic source stand-ins. |
+| 8 QA + review dashboard | Complete | Video/evidence/score/style/compliance display plus timestamped enrichment timeline; approve/change/reject; deterministic failure blocks approval; audited rule revision re-evaluates QA and revokes invalid approvals; history retained. |
+| 9 Edit loop | Complete | Natural-language parser covers timing, caption/watermark/crop/headline/context plus removal, replacement, volume, extra B-roll, regenerated enrichment and native zoom requests; child renders/plans preserve parents. |
 | 10 Email notification | Production-capable; live credentials pending | File sink plus Resend HTTPS adapter with provider idempotency, secret-safe failures and configuration diagnostics. Review-ready messages include campaign/source/research/candidate/clip counts and dashboard URL. Live delivery is not claimed until a Resend key and verified sender domain are supplied and exercised. |
 | 11 Approval-gated publication | Complete for export fallback | Campaign-scoped connected accounts, approval and QA gates, approved-source/account rechecks, idempotent publication and manual export instructions. Live posting APIs are not configured. |
 | 12 Feedback + performance | Complete | Human feedback and market snapshots remain independent; fixed reason taxonomy; computed revenue per clip/human-hour; disagreement API/dashboard signal. |
 | 13 Research Ledger + experiments | Complete | Prediction policy recorded before outcome; deterministic control/treatment assignment before scoring; exploration allocation; arm outcome summaries; auditable activation and rollback. |
 | 14 Operational hardening | £0-friendly stateless deployment configuration complete; live deployment blocked | Diskless Render Free Blueprint, external Postgres/S3 persistence, private streamed clip delivery, scheduled bounded GitHub Actions worker and external-persistence diagnostics are implemented. App/worker restarts do not own durable files. No Neon, R2, Render or GitHub Actions credentials/session exists here, so live cloud persistence and browser-off acceptance are not claimed. |
+| 15 Creative enrichment | Complete locally; external catalogue licensing is user responsibility | Fail-closed campaign controls/raw brief, rights-aware Asset library/uploads, observed/inferred/unavailable research features, candidate suitability, semantic planner, FFmpeg composition, strategy tracking, enrichment QA/timeline and immutable natural-language edit loop are implemented. The realistic fixture renders music + meme + B-roll + punch-in and exercises the exact combined edit. No scraped or commercially restricted media is bundled. |
 
 ## Current work
 
@@ -29,10 +30,10 @@ Build #2 code/configuration is ready for credentialled validation but is not com
 
 ## Last passing checks
 
-- `ruff check alpha tests`: passed (2026-08-12).
-- `ruff format --check alpha tests`: passed (2026-08-12).
-- `node --check web/app.js`: passed (2026-08-12).
-- `pytest`: 35 passed in 179.79s (2026-08-15), including S3-compatible round-trip/streaming, private URI validation, disposable materialisation, real FFmpeg render upload/recovery through a fresh adapter, database target selection, SQLite process-restart persistence and diskless deployment configuration; the prior 30 tests remain passing.
+- `ruff check alpha tests`: passed (2026-08-17).
+- `ruff format --check alpha tests`: passed (2026-08-17).
+- `node --check web/app.js`: passed (2026-08-17).
+- `pytest`: all 39 tests passed in three isolated full-suite partitions (2026-08-17), including the prior 35 tests plus campaign enrichment research/QA, review-command parsing, a localized freeze-frame renderer contract, and a real FFmpeg music + meme + B-roll + punch-in render followed by the exact immutable child edit. Existing external-persistence, live-provider, durability, authentication, email and deployment contracts remain passing.
 - Real public endpoint smoke (2026-08-13): TikTok official oEmbed returned real metadata; Google News RSS returned 100 current results; GDELT returned HTTP 429 and the fallback behaved as designed.
 - Prior cloud entry-point smoke (2026-08-13) covered the superseded persistent-disk entry. The new diskless Blueprint and scheduled-worker configuration are locally validated but cannot be remotely exercised without the accounts below.
 - Authenticated in-app browser smoke: signed in, submitted a campaign with a selected export account, left the worker processing, reloaded to `awaiting_review` with three QA-passed variants, and opened the populated Research Ledger.
@@ -47,6 +48,7 @@ Build #2 code/configuration is ready for credentialled validation but is not com
 5. GitHub Actions secrets and enabled scheduled workflow plus a Render account connected to the repository. No persistent disk or paid Render plan is required.
 6. Resend `RESEND_API_KEY` and `RESEND_FROM_EMAIL` at a verified domain.
 7. Optional stronger platform coverage: approved TikTok Research Tools client key/secret and/or Instagram professional-account token/user ID. The automatic YouTube + public web/TikTok-example path does not depend on these optional approvals.
+8. Real enrichment requires user-owned, public-domain or properly licensed campaign assets with commercial-use permission. The repository intentionally includes no third-party music, meme, reaction, stock-video or SFX catalogue and cannot grant those rights.
 
 ## External integrations requiring credentials
 

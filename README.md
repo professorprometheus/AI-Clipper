@@ -146,6 +146,14 @@ The workflow's hourly cadence is intentionally below GitHub Free's 2,000 private
 
 There is no unavoidable monthly component at this scale. Exceeding a provider allowance may suspend work or incur that provider's published usage charge, so inspect usage after the first real campaign.
 
+## Optional creative enrichment
+
+Campaign intake now preserves the raw brief and exposes fail-closed permissions for music, memes/reactions, B-roll, SFX and external images/video, including insert limits, volume range, ducking, required sources and prohibited types. Before submitting, users can upload authorised campaign music, reaction art and B-roll with licence and commercial-use attestations; production files are private S3 objects, while local development uses the filesystem adapter.
+
+The worker persists an evidence-backed Enrichment Plan before FFmpeg rendering. Supported composition includes music loops/fades/speech ducking, timed SFX, image/video full-screen/PiP/overlays, and native punch-in, dynamic crop/speaker focus, freeze, emphasis text, keyword/progress/pull-quote treatment, blur, fast-cut and reaction-hold events. The review dashboard explains the timestamp, asset and reason for each event. Requests such as `remove music`, `less memes`, `more B-roll`, `change music`, `move meme to 4 seconds`, `regenerate enrichment`, and the combined acceptance edit create immutable child versions.
+
+ALPHA ships no copied meme/music catalogue and requires no paid asset provider. Supply user-owned, public-domain or properly licensed assets; recorded metadata does not transfer or guarantee rights.
+
 ## Durable processing model
 
 Each worker acquisition leases exactly one stage and actively renews that lease while the stage runs. The output and completed-stage checkpoint are committed before the next stage is queued. A killed worker's lease expires and another worker resumes the same stage; stale workers cannot commit after losing their token. Retry availability, exponential backoff and every attempt are persisted, while completed side effects are protected by stable uniqueness/idempotency keys. Logical jobs can therefore span many worker executions and do not assume one process lives for 72 hours.

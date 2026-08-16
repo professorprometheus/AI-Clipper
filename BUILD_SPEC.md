@@ -320,6 +320,23 @@ Acceptance:
 - fresh deployment documented;
 - IMPLEMENTATION_STATUS.md accurate.
 
+## Enrichment extension — campaign-aware licensed editing
+
+Build:
+- raw brief plus fail-closed campaign enrichment controls;
+- reusable rights/provenance-bearing Asset records in object storage;
+- observed/inferred/unavailable enrichment research features and candidate suitability;
+- a durable `plan_enrichment` stage before rendering;
+- FFmpeg music looping/fades/ducking/mixing, SFX, licensed visual inserts and native emphasis events;
+- review timeline, asset-aware natural-language revisions and immutable child plans;
+- per-variant strategy features for later outcome analysis.
+
+Acceptance:
+- a fixture candidate renders music, an authorised meme/reaction, B-roll and a punch-in;
+- every external event has a permitted type, verified object, licence and rights attestation;
+- the exact request "remove the meme, make the music quieter and add a zoom at the punchline" creates a QA-passed child without mutating its parent;
+- no paid media library is mandatory.
+
 ## Out of scope for V0
 
 - fully autonomous publishing without approval;

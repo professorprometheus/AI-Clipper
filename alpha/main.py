@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import mimetypes
 import os
 import secrets
@@ -256,6 +257,51 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @api.post("/api/campaigns/{campaign_id}/assets", status_code=201)
+    async def import_enrichment_asset(
+        campaign_id: str,
+        asset: UploadFile = File(...),
+        asset_type: str = Form(...),
+        title: str = Form(...),
+        tags_json: str = Form(default="[]"),
+        semantic_description: str = Form(default=""),
+        licence: str = Form(...),
+        permitted_commercial_use: bool = Form(...),
+        attribution_requirement: str | None = Form(default=None),
+        source_url: str | None = Form(default=None),
+        campaign_restrictions_json: str = Form(default="{}"),
+        rights_attestation: str = Form(...),
+    ):
+        try:
+            tags = json.loads(tags_json)
+            restrictions = json.loads(campaign_restrictions_json)
+            if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
+                raise ValueError("tags_json must be a list of strings")
+            if not isinstance(restrictions, dict):
+                raise ValueError("campaign_restrictions_json must be an object")
+            return service.import_asset(
+                campaign_id,
+                asset_type,
+                asset.filename or "asset.bin",
+                asset.content_type or "application/octet-stream",
+                await asset.read(),
+                title,
+                tags,
+                semantic_description,
+                licence,
+                permitted_commercial_use,
+                attribution_requirement,
+                source_url,
+                restrictions,
+                rights_attestation,
+            )
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @api.get("/api/campaigns/{campaign_id}/assets")
+    def list_enrichment_assets(campaign_id: str):
+        return service.list_assets(campaign_id)
 
     @api.get("/api/campaigns/{campaign_id}/search")
     def semantic_search(

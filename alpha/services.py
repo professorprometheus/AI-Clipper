@@ -61,8 +61,8 @@ class AlphaService:
                 )
         self.db.execute(
             "INSERT INTO campaigns(id,name,owner_email,platform,campaign_url,payout_model,payout_value,currency,"
-            "deadline,status,research_seeds_json,target_platforms_json,watermark_json,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "deadline,status,research_seeds_json,target_platforms_json,watermark_json,raw_brief,"
+            "enrichment_config_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 campaign_id,
                 payload.name,
@@ -77,6 +77,8 @@ class AlphaService:
                 dump(payload.research_seeds),
                 dump(payload.target_platforms),
                 dump(watermark) if watermark else None,
+                payload.raw_brief,
+                dump(payload.enrichment.model_dump()),
                 timestamp,
                 timestamp,
             ),
@@ -356,6 +358,7 @@ class AlphaService:
         campaign["research_seeds"] = load(campaign.pop("research_seeds_json"), [])
         campaign["target_platforms"] = load(campaign.pop("target_platforms_json"), [])
         campaign["watermark"] = load(campaign.pop("watermark_json"), None)
+        campaign["enrichment"] = load(campaign.pop("enrichment_config_json"), {})
         campaign["sources"] = self.db.all(
             "SELECT * FROM approved_sources WHERE campaign_id=? ORDER BY created_at", (campaign_id,)
         )
@@ -380,6 +383,153 @@ class AlphaService:
             (campaign_id,),
         )
         return campaign
+
+    def import_asset(
+        self,
+        campaign_id: str,
+        asset_type: str,
+        filename: str,
+        content_type: str,
+        content: bytes,
+        title: str,
+        tags: list[str],
+        semantic_description: str,
+        licence: str,
+        permitted_commercial_use: bool,
+        attribution_requirement: str | None,
+        source_url: str | None,
+        campaign_restrictions: dict[str, Any],
+        rights_attestation: str,
+    ) -> dict[str, Any]:
+        campaign = self.db.one("SELECT status FROM campaigns WHERE id=?", (campaign_id,))
+        if not campaign:
+            raise KeyError("campaign not found")
+        if campaign["status"] != "draft":
+            raise PermissionError("assets can only be added before campaign submission")
+        allowed_types = {
+            "music",
+            "meme_image",
+            "meme_video",
+            "reaction",
+            "broll",
+            "sfx",
+            "image",
+            "graphic",
+        }
+        if asset_type not in allowed_types:
+            raise ValueError("unsupported enrichment asset type")
+        if not content or len(content) > 150_000_000:
+            raise ValueError("asset must be between 1 byte and 150 MB")
+        if len(rights_attestation.strip()) < 12:
+            raise ValueError("a clear asset-rights attestation is required")
+        if not licence.strip():
+            raise ValueError("asset licence/source is required")
+        suffix = Path(filename).suffix.lower()
+        image_extensions = {".png", ".jpg", ".jpeg", ".webp", ".ppm"}
+        video_extensions = {".mp4", ".mov", ".mkv", ".webm", ".gif"}
+        audio_extensions = {".mp3", ".wav", ".aac", ".m4a", ".ogg", ".flac"}
+        expected = (
+            audio_extensions
+            if asset_type in {"music", "sfx"}
+            else image_extensions
+            if asset_type in {"meme_image", "image", "graphic"}
+            else image_extensions | video_extensions
+        )
+        if suffix not in expected:
+            raise ValueError(f"unsupported file format for {asset_type}")
+        sha256 = hashlib.sha256(content).hexdigest()
+        for existing in self.db.all(
+            "SELECT id,metadata_json FROM assets WHERE campaign_id=?", (campaign_id,)
+        ):
+            if load(existing["metadata_json"], {}).get("sha256") == sha256:
+                raise ValueError("this asset has already been imported into the campaign")
+        asset_id = uid()
+        uri = self.pipeline.providers.storage.put_bytes(
+            f"assets/{campaign_id}/{asset_id}{suffix}", content, content_type
+        )
+        duration_ms = None
+        probe: dict[str, Any] = {}
+        try:
+            if suffix in video_extensions | audio_extensions:
+                with self.pipeline.providers.storage.materialize(uri) as local_asset:
+                    probe = self.pipeline.providers.renderer.probe_asset(local_asset)
+                if not probe["valid"]:
+                    raise ValueError("uploaded asset is not readable media")
+                duration_ms = probe["duration_ms"]
+            metadata = {
+                "sha256": sha256,
+                "original_filename": Path(filename).name,
+                "content_type": content_type,
+                "probe": probe,
+                "user_uploaded": True,
+            }
+            self.db.execute(
+                "INSERT INTO assets(id,campaign_id,asset_type,file_uri,title,tags_json,semantic_description,"
+                "duration_ms,licence,permitted_commercial_use,attribution_requirement,source_url,"
+                "campaign_restrictions_json,embedding_json,metadata_json,rights_attestation,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    asset_id,
+                    campaign_id,
+                    asset_type,
+                    uri,
+                    title.strip() or Path(filename).stem,
+                    dump(sorted({tag.strip().lower() for tag in tags if tag.strip()})),
+                    semantic_description.strip(),
+                    duration_ms,
+                    licence.strip(),
+                    int(permitted_commercial_use),
+                    attribution_requirement.strip() if attribution_requirement else None,
+                    source_url.strip() if source_url else None,
+                    dump(campaign_restrictions),
+                    dump(embedding(" ".join([title, semantic_description, *tags]))),
+                    dump(metadata),
+                    rights_attestation.strip(),
+                    now(),
+                ),
+            )
+        except Exception:
+            self.pipeline.providers.storage.delete(uri)
+            raise
+        self.db.audit(
+            "asset",
+            asset_id,
+            "authorised_asset_imported",
+            {
+                "campaign_id": campaign_id,
+                "asset_type": asset_type,
+                "licence": licence.strip(),
+                "commercial_use": permitted_commercial_use,
+                "sha256": sha256,
+            },
+        )
+        return self.get_asset(asset_id)
+
+    def get_asset(self, asset_id: str) -> dict[str, Any]:
+        asset = self.db.one("SELECT * FROM assets WHERE id=?", (asset_id,))
+        if not asset:
+            raise KeyError("asset not found")
+        defaults: dict[str, Any] = {
+            "tags_json": [],
+            "campaign_restrictions_json": {},
+            "embedding_json": [],
+            "metadata_json": {},
+        }
+        for key, default in defaults.items():
+            asset[key.removesuffix("_json")] = load(asset.pop(key), default)
+        asset["permitted_commercial_use"] = bool(asset["permitted_commercial_use"])
+        return asset
+
+    def list_assets(self, campaign_id: str) -> list[dict[str, Any]]:
+        if not self.db.one("SELECT id FROM campaigns WHERE id=?", (campaign_id,)):
+            raise KeyError("campaign not found")
+        return [
+            self.get_asset(row["id"])
+            for row in self.db.all(
+                "SELECT id FROM assets WHERE campaign_id=? OR campaign_id IS NULL ORDER BY created_at",
+                (campaign_id,),
+            )
+        ]
 
     def create_connected_account(self, payload: ConnectedAccountCreate) -> dict[str, Any]:
         account_id = uid()
@@ -629,7 +779,8 @@ class AlphaService:
         campaign = self.get_campaign(campaign_id)
         variants = self.db.all(
             "SELECT v.*,m.source_item_id,m.start_ms,m.end_ms,m.transcript,m.discovery_pass,m.research_match_json,"
-            "m.evidence_ids_json,m.scores_json,m.selection_reason,m.saturation_json,m.policy_id,s.title AS source_title,"
+            "m.evidence_ids_json,m.scores_json,m.selection_reason,m.saturation_json,"
+            "m.enrichment_suitability_json,m.policy_id,s.title AS source_title,"
             "s.source_url FROM clip_variants v JOIN candidate_moments m ON m.id=v.candidate_id "
             "JOIN source_items s ON s.id=m.source_item_id WHERE m.campaign_id=? ORDER BY v.predicted_score DESC,v.version DESC",
             (campaign_id,),
@@ -643,8 +794,23 @@ class AlphaService:
                 "evidence_ids_json",
                 "scores_json",
                 "saturation_json",
+                "enrichment_suitability_json",
             ):
                 variant[key.removesuffix("_json")] = load(variant.pop(key), {})
+            plan = self.db.one(
+                "SELECT id,plan_json,strategy_features_json FROM enrichment_plans "
+                "WHERE candidate_id=? AND version=?",
+                (variant["candidate_id"], variant["version"]),
+            )
+            variant["enrichment_plan"] = (
+                {
+                    "id": plan["id"],
+                    "plan": load(plan["plan_json"], {}),
+                    "strategy_features": load(plan["strategy_features_json"], {}),
+                }
+                if plan
+                else None
+            )
             variant["reviews"] = self.db.all(
                 "SELECT * FROM reviews WHERE clip_variant_id=? ORDER BY created_at",
                 (variant["id"],),
@@ -705,7 +871,6 @@ class AlphaService:
     ) -> dict[str, Any]:
         current = load(parent["render_spec_json"])
         changes = self.pipeline.providers.ai.interpret_edit_request(instruction, current)
-        spec = apply_changes(current, changes)
         candidate = self.db.one(
             "SELECT * FROM candidate_moments WHERE id=?", (parent["candidate_id"],)
         )
@@ -716,13 +881,35 @@ class AlphaService:
             )["n"]
             or 0
         )
+        child_version = max_version + 1
+        spec = apply_changes(current, changes)
+        spec = self.pipeline.revise_enrichment_spec(
+            candidate["campaign_id"], candidate, spec, changes, child_version
+        )
         child_id = uid()
         render = self.pipeline.providers.renderer.render(candidate["campaign_id"], child_id, spec)
         spec["render"] = {
             "renderer": render.renderer,
             "sha256": render.sha256,
             "probe": render.probe,
+            "file_uri": render.file_uri,
+            "storage_verified": self.pipeline.providers.storage.exists(render.file_uri),
         }
+        plan_id = uid()
+        spec["enrichment"]["plan_id"] = plan_id
+        self.db.execute(
+            "INSERT INTO enrichment_plans(id,campaign_id,candidate_id,version,plan_json,"
+            "strategy_features_json,created_at) VALUES (?,?,?,?,?,?,?)",
+            (
+                plan_id,
+                candidate["campaign_id"],
+                candidate["id"],
+                child_version,
+                dump(spec["enrichment"]),
+                dump(spec["enrichment"].get("strategy_features", {})),
+                now(),
+            ),
+        )
         requirements = self.pipeline._requirements(candidate["campaign_id"])
         approved_items = {
             row["id"]
@@ -739,7 +926,7 @@ class AlphaService:
                 parent["candidate_id"],
                 parent["id"],
                 parent["style_profile_id"],
-                max_version + 1,
+                child_version,
                 dump(spec),
                 render.file_uri,
                 "passed" if report["passed"] else "failed",
@@ -870,8 +1057,12 @@ class AlphaService:
 
     def outcomes(self, campaign_id: str) -> dict[str, Any]:
         rows = self.db.all(
-            "SELECT v.id AS variant_id,v.predicted_score,r.decision,f.rating,p.id AS publication_id,ps.metrics_json,ps.revenue_json "
+            "SELECT v.id AS variant_id,v.predicted_score,v.version,m.id AS candidate_id,"
+            "m.policy_id,"
+            "r.decision,f.rating,p.id AS publication_id,ps.metrics_json,ps.revenue_json,"
+            "e.strategy_features_json "
             "FROM candidate_moments m JOIN clip_variants v ON v.candidate_id=m.id "
+            "LEFT JOIN enrichment_plans e ON e.candidate_id=v.candidate_id AND e.version=v.version "
             "LEFT JOIN reviews r ON r.clip_variant_id=v.id LEFT JOIN feedback f ON f.clip_variant_id=v.id "
             "LEFT JOIN publications p ON p.clip_variant_id=v.id LEFT JOIN performance_snapshots ps ON ps.publication_id=p.id "
             "WHERE m.campaign_id=?",
@@ -881,6 +1072,9 @@ class AlphaService:
         for row in rows:
             metrics = load(row["metrics_json"], {})
             revenue = load(row["revenue_json"], {})
+            row["metrics"] = metrics
+            row["revenue"] = revenue
+            row["enrichment_strategy"] = load(row.pop("strategy_features_json"), {})
             market_good = metrics.get("views", 0) > 0 or revenue.get("revenue", 0) > 0
             user_good = row["decision"] == "approve" or (row["rating"] or 0) >= 4
             if row["metrics_json"] and market_good != user_good:

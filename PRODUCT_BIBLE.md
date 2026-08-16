@@ -190,7 +190,15 @@ Capture where available:
 
 Alpha should compare user preference against market results and surface meaningful disagreements.
 
-## 10. V0 success criteria
+## 10. Campaign-aware creative enrichment
+
+Enrichment is an optional, evidence-driven strategy rather than decoration. The raw campaign brief remains the source record, while structured controls fail closed for music, memes/reactions, B-roll, sound effects and external image/video. A renderer may use external media only when the asset has recorded rights, licence, commercial-use and campaign provenance.
+
+Each selected moment receives a versioned Enrichment Plan containing exact timing, duration, purpose, reason and asset lineage. Candidate suitability, successful-example feature evidence and campaign permissions inform that decision. Features that cannot be measured from public evidence must be labelled unavailable rather than invented. Native edits such as punch-ins, crops, freeze frames and emphasis graphics remain available without external copyright dependencies.
+
+Enrichment choices are stored as measurable strategy features with the immutable clip version. Human edits create child plans, and performance experiments compare strategies such as music/silence, meme/no-meme, B-roll density and zoom timing without assuming that enrichment helps.
+
+## 11. V0 success criteria
 
 The V0 thesis to test:
 
@@ -208,7 +216,7 @@ Milestones:
 9. First £1 of attributable revenue.
 10. Compare Alpha-selected clips against a human/control baseline.
 
-## 11. Cost doctrine
+## 12. Cost doctrine
 
 At £0 revenue, prefer free/open-source/local/free-tier components.
 
@@ -216,7 +224,7 @@ Do not optimise for permanently spending £0. Optimise for return on cost.
 
 A paid service becomes rational when expected incremental value comfortably exceeds incremental cost and the evidence is recorded.
 
-## 12. Long-term moat hypothesis
+## 13. Long-term moat hypothesis
 
 The moat is not FFmpeg, Whisper or a foundation model.
 

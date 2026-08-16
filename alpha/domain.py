@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
 from collections import Counter, defaultdict
@@ -123,9 +124,58 @@ def infer_style(example_analyses: list[dict[str, Any]]) -> dict[str, Any]:
         "confidence": 0.8,
         "evidence_ids": [row["id"] for row in example_analyses],
     }
+    enrichment_fields = sorted(
+        {key for row in example_analyses for key in row["analysis"].get("enrichment_features", {})}
+    )
+    enrichment: dict[str, Any] = {}
+    for field in enrichment_fields:
+        evidence = [
+            (row["id"], row["analysis"]["enrichment_features"][field])
+            for row in example_analyses
+            if field in row["analysis"].get("enrichment_features", {})
+        ]
+        available = [
+            (row_id, value) for row_id, value in evidence if value["status"] != "unavailable"
+        ]
+        if not available:
+            enrichment[field] = {
+                "status": "unavailable",
+                "value": None,
+                "confidence": 0.0,
+                "evidence_ids": [row_id for row_id, _value in evidence],
+            }
+            continue
+        values = [str(value.get("value")) for _row_id, value in available]
+        common, count = Counter(values).most_common(1)[0]
+        enrichment[field] = {
+            "status": "observed"
+            if any(value["status"] == "observed" for _row_id, value in available)
+            else "inferred",
+            "value": available[values.index(common)][1].get("value"),
+            "confidence": round(
+                sum(float(value.get("confidence", 0)) for _row_id, value in available)
+                / len(available)
+                * (count / len(available)),
+                3,
+            ),
+            "evidence_ids": [
+                row_id for row_id, value in available if str(value.get("value")) == common
+            ],
+        }
+    features["enrichment"] = enrichment
+    top_level_confidences = [
+        float(value["confidence"])
+        for key, value in features.items()
+        if key != "enrichment" and "confidence" in value
+    ]
+    enrichment_confidences = [float(value["confidence"]) for value in enrichment.values()]
     return {
         "features": features,
-        "confidence": round(sum(v["confidence"] for v in features.values()) / len(features), 3),
+        "confidence": round(
+            sum(top_level_confidences + enrichment_confidences)
+            / max(1, len(top_level_confidences) + len(enrichment_confidences)),
+            3,
+        ),
     }
 
 
@@ -156,6 +206,105 @@ def candidate_scores(
         "campaign_relevance": round(max(0.45, research_similarity), 3),
         "rule_risk": 0.0,
         "diversification": round(min(0.5 + source_index * 0.04, 0.95), 3),
+    }
+
+
+def analyse_enrichment_features(analysis: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Label only what available evidence supports; metadata cannot observe edit tracks."""
+    supplied = analysis.get("live_evidence", {}).get("enrichment_observations", {})
+    fields = (
+        "music_presence",
+        "music_intensity",
+        "music_changes",
+        "reaction_inserts",
+        "meme_inserts",
+        "broll_frequency",
+        "insert_timing",
+        "insert_duration",
+        "zoom_punch_in_frequency",
+        "freeze_frames",
+        "sound_effects",
+        "visual_emphasis",
+    )
+    result: dict[str, dict[str, Any]] = {}
+    for field in fields:
+        if field in supplied:
+            result[field] = {
+                "status": "observed",
+                "value": supplied[field],
+                "confidence": 0.95,
+                "evidence": "provider-supplied measurable edit observation",
+            }
+        else:
+            result[field] = {
+                "status": "unavailable",
+                "value": None,
+                "confidence": 0.0,
+                "evidence": "public metadata/transcript does not expose this edit-track feature",
+            }
+    # Text/style evidence supports weak strategy inference, never an observation claim.
+    if float(analysis.get("humour", 0)) >= 0.7:
+        result["reaction_inserts"] = {
+            "status": "inferred",
+            "value": "potentially_present",
+            "confidence": 0.35,
+            "evidence": "humour-oriented successful example; insert itself was not measurable",
+        }
+    if analysis.get("pacing") == "fast":
+        result["zoom_punch_in_frequency"] = {
+            "status": "inferred",
+            "value": "possibly_frequent",
+            "confidence": 0.3,
+            "evidence": "fast pacing heuristic; camera transform was not measurable",
+        }
+    if analysis.get("headline") not in {None, "not_measurable_from_metadata"}:
+        result["visual_emphasis"] = {
+            "status": "inferred",
+            "value": "likely",
+            "confidence": 0.4,
+            "evidence": "headline/style heuristic; exact emphasis track was not measurable",
+        }
+    return result
+
+
+def enrichment_suitability(text: str) -> dict[str, dict[str, Any]]:
+    lower = text.lower()
+    humour = any(word in lower for word in ("funny", "absurd", "joke", "ridiculous"))
+    context = any(word in lower for word in ("proof", "method", "example", "context", "because"))
+    emotional = any(
+        word in lower for word in ("surprising", "fails", "miss", "important", "memorable")
+    )
+    return {
+        "static_visual_risk": {
+            "status": "unavailable",
+            "value": None,
+            "reason": "no shot-change or motion track is available at candidate scoring time",
+        },
+        "humour_insert_opportunity": {
+            "status": "inferred",
+            "value": 0.85 if humour else 0.2,
+            "reason": "derived from timestamped transcript language",
+        },
+        "context_visualisation_opportunity": {
+            "status": "inferred",
+            "value": 0.8 if context else 0.25,
+            "reason": "derived from explanation/example language",
+        },
+        "broll_suitability": {
+            "status": "inferred",
+            "value": 0.75 if context else 0.2,
+            "reason": "contextual claims can be illustrated when authorised assets exist",
+        },
+        "music_suitability": {
+            "status": "inferred",
+            "value": 0.65 if emotional else 0.25,
+            "reason": "emotional language is a weak music-strategy signal",
+        },
+        "enrichment_overload_risk": {
+            "status": "unavailable",
+            "value": None,
+            "reason": "risk depends on the eventual plan and campaign limits",
+        },
     }
 
 
@@ -205,6 +354,73 @@ def parse_edit_instruction(instruction: str, current: dict[str, Any]) -> dict[st
         changes["context_segment"] = "removed"
     if "restore context" in text:
         changes["context_segment"] = "restored"
+    remove_types: list[str] = []
+    if "remove music" in text or "no music" in text:
+        remove_types.append("music")
+    if "remove the meme" in text or "remove meme" in text or "less memes" in text:
+        remove_types.extend(["meme_image", "meme_video", "reaction"])
+    if "remove b-roll" in text or "remove broll" in text:
+        remove_types.append("broll")
+    if "remove sound effects" in text or "remove sfx" in text:
+        remove_types.append("sfx")
+    if "remove the zoom" in text or "remove zoom" in text or "remove punch-in" in text:
+        remove_types.extend(["punch_in", "dynamic_crop", "speaker_focus"])
+    if "remove external images" in text:
+        remove_types.extend(["image", "graphic"])
+    if remove_types:
+        changes["enrichment_remove_types"] = sorted(set(remove_types))
+    if "music quieter" in text or "quieter music" in text or "lower the music" in text:
+        changes["enrichment_music_volume_delta_db"] = -6.0
+    if "music louder" in text or "louder music" in text:
+        changes["enrichment_music_volume_delta_db"] = 3.0
+    if "more b-roll" in text or "more broll" in text:
+        changes["enrichment_request_asset_type"] = "broll"
+    if "change music" in text or "replace music" in text:
+        changes["enrichment_replace_asset_type"] = "music"
+    if "replace meme" in text or "change meme" in text:
+        changes["enrichment_replace_asset_type"] = "meme"
+    if "replace reaction" in text or "change reaction" in text:
+        changes["enrichment_replace_asset_type"] = "reaction"
+    if "replace sound effect" in text or "change sound effect" in text:
+        changes["enrichment_replace_asset_type"] = "sfx"
+    if "replace b-roll" in text or "change b-roll" in text or "replace broll" in text:
+        changes["enrichment_replace_asset_type"] = "broll"
+    if "regenerate enrichment" in text:
+        changes["enrichment_regenerate"] = True
+    if ("add a zoom" in text or "add zoom" in text or "add a punch-in" in text) and (
+        "punchline" in text or "hook" in text
+    ):
+        duration = int(current.get("duration_ms", 1000))
+        at_hook = "hook" in text and "punchline" not in text
+        changes["enrichment_add_native"] = {
+            "type": "punch_in",
+            "start_ms": 250 if at_hook else max(0, duration - 1500),
+            "duration_ms": min(1000, duration),
+            "mode": "native",
+            "purpose": "emphasise the hook" if at_hook else "emphasise the punchline",
+            "reason": "requested during human review",
+            "parameters": {"scale": 1.12},
+        }
+    timing = re.search(
+        r"move\s+(music|meme|reaction|b[ -]?roll|zoom|punch[ -]?in)\s+to\s+(\d+(?:\.\d+)?)\s*seconds?",
+        text,
+    )
+    if timing:
+        names = {
+            "meme": ["meme_image", "meme_video"],
+            "reaction": ["reaction"],
+            "b-roll": ["broll"],
+            "b roll": ["broll"],
+            "broll": ["broll"],
+            "zoom": ["punch_in"],
+            "punch-in": ["punch_in"],
+            "punch in": ["punch_in"],
+            "music": ["music"],
+        }
+        changes["enrichment_move"] = {
+            "types": names[timing.group(1)],
+            "start_ms": round(float(timing.group(2)) * 1000),
+        }
     if not changes:
         changes["manual_note"] = instruction
     return changes
@@ -214,7 +430,44 @@ def apply_changes(spec: dict[str, Any], changes: dict[str, Any]) -> dict[str, An
     import copy
 
     updated = copy.deepcopy(spec)
+    enrichment = updated.setdefault("enrichment", {})
+    events = enrichment.setdefault("events", [])
+    remove_types = set(changes.get("enrichment_remove_types", []))
+    if remove_types:
+        events[:] = [event for event in events if event.get("type") not in remove_types]
+    if "enrichment_music_volume_delta_db" in changes:
+        controls = enrichment.get("controls", {})
+        minimum = float(controls.get("music_volume_min_db", -60))
+        maximum = float(controls.get("music_volume_max_db", 0))
+        for event in events:
+            if event.get("type") == "music":
+                current_volume = float(event.setdefault("parameters", {}).get("volume_db", -20))
+                event["parameters"]["volume_db"] = max(
+                    minimum,
+                    min(
+                        maximum, current_volume + float(changes["enrichment_music_volume_delta_db"])
+                    ),
+                )
+    if "enrichment_add_native" in changes:
+        event = copy.deepcopy(changes["enrichment_add_native"])
+        event["id"] = hashlib.sha256(
+            json.dumps(event, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()[:20]
+        events.append(event)
+    if "enrichment_move" in changes:
+        move = changes["enrichment_move"]
+        for event in events:
+            if event.get("type") in move["types"]:
+                event["start_ms"] = max(
+                    0,
+                    min(
+                        int(move["start_ms"]),
+                        int(updated.get("duration_ms", 0)) - int(event.get("duration_ms", 0)),
+                    ),
+                )
     for key, value in changes.items():
+        if key.startswith("enrichment_"):
+            continue
         if "." not in key:
             updated[key] = value
             continue
@@ -282,6 +535,190 @@ def deterministic_qa(
                 },
             ]
         )
+    enrichment = spec.get("enrichment", {})
+    controls = enrichment.get("controls", {})
+    events = enrichment.get("events", [])
+    native_types = {
+        "punch_in",
+        "dynamic_crop",
+        "freeze_frame",
+        "text_emphasis",
+        "keyword_highlight",
+        "progress_caption",
+        "pull_quote",
+        "blur_background",
+        "speaker_focus",
+        "fast_cut",
+        "reaction_hold",
+    }
+    external_events = [event for event in events if event.get("type") not in native_types]
+    insert_events = [event for event in external_events if event.get("type") != "music"]
+    max_inserts = int(controls.get("max_inserts", 0))
+    max_insert_ms = round(float(controls.get("max_insert_duration_seconds", 2.0)) * 1000)
+    prohibited = set(controls.get("prohibited_asset_types", []))
+    permitted_external_types = {
+        "music",
+        "meme_image",
+        "meme_video",
+        "reaction",
+        "broll",
+        "sfx",
+        "image",
+        "graphic",
+    }
+    logical_checks: list[dict[str, Any]] = [
+        {
+            "key": "enrichment_insert_limit",
+            "passed": len(insert_events) <= max_inserts,
+            "mandatory": True,
+            "observed": len(insert_events),
+            "expected": max_inserts,
+        },
+        {
+            "key": "render_object_persisted",
+            "passed": bool(
+                spec.get("render", {}).get(
+                    "storage_verified", render_probe.get("valid") if render_probe else True
+                )
+            ),
+            "mandatory": render_probe is not None,
+            "observed": spec.get("render", {}).get("file_uri"),
+        },
+    ]
+    for event in events:
+        event_type = str(event.get("type"))
+        start_ms = int(event.get("start_ms", 0))
+        duration_ms = int(event.get("duration_ms", 0))
+        is_native = event_type in native_types
+        allowed = is_native or event_type in permitted_external_types
+        if not is_native:
+            media_kind = event.get("media_kind")
+            if event_type == "music":
+                allowed = bool(controls.get("music_allowed"))
+            elif event_type == "sfx":
+                allowed = bool(controls.get("sound_effects_allowed"))
+            elif event_type == "broll":
+                allowed = bool(controls.get("broll_allowed"))
+            elif event_type in {"meme_image", "meme_video", "reaction"}:
+                allowed = bool(controls.get("memes_allowed"))
+            if media_kind == "video":
+                allowed = allowed and bool(controls.get("external_video_allowed"))
+            else:
+                allowed = allowed and bool(controls.get("external_images_allowed"))
+            if event_type in {"music", "sfx"}:
+                # Audio permissions are expressed by their dedicated controls.
+                allowed = event_type not in prohibited and (
+                    bool(controls.get("music_allowed"))
+                    if event_type == "music"
+                    else bool(controls.get("sound_effects_allowed"))
+                )
+        logical_checks.extend(
+            [
+                {
+                    "key": f"enrichment_bounds:{event.get('id', event_type)}",
+                    "passed": start_ms >= 0
+                    and duration_ms > 0
+                    and start_ms + duration_ms <= int(spec.get("duration_ms", 0)),
+                    "mandatory": True,
+                    "observed": {"start_ms": start_ms, "duration_ms": duration_ms},
+                },
+                {
+                    "key": f"enrichment_type_permitted:{event.get('id', event_type)}",
+                    "passed": allowed and event_type not in prohibited,
+                    "mandatory": True,
+                    "observed": event_type,
+                },
+            ]
+        )
+        if not is_native:
+            provenance = event.get("provenance", {})
+            required_source = str(controls.get("required_asset_source") or "").lower().strip()
+            source_haystack = " ".join(
+                str(value or "")
+                for value in (
+                    provenance.get("licence"),
+                    provenance.get("source_url"),
+                    provenance.get("library"),
+                )
+            ).lower()
+            restrictions = provenance.get("campaign_restrictions", {})
+            campaign_id = spec.get("metadata", {}).get("campaign_id")
+            permitted_campaigns = restrictions.get("campaign_ids", [])
+            prohibited_campaigns = restrictions.get("prohibited_campaign_ids", [])
+            logical_checks.extend(
+                [
+                    {
+                        "key": f"asset_rights:{event.get('id', event_type)}",
+                        "passed": bool(provenance.get("licence"))
+                        and bool(provenance.get("rights_attestation"))
+                        and bool(provenance.get("permitted_commercial_use")),
+                        "mandatory": True,
+                        "observed": provenance.get("licence"),
+                    },
+                    {
+                        "key": f"asset_storage:{event.get('id', event_type)}",
+                        "passed": bool(event.get("asset_uri"))
+                        and bool(event.get("storage_verified")),
+                        "mandatory": True,
+                        "observed": event.get("asset_uri"),
+                    },
+                    {
+                        "key": f"asset_attribution:{event.get('id', event_type)}",
+                        "passed": not provenance.get("attribution_requirement")
+                        or bool(provenance.get("attribution_text")),
+                        "mandatory": True,
+                        "observed": provenance.get("attribution_text"),
+                    },
+                    {
+                        "key": f"asset_required_source:{event.get('id', event_type)}",
+                        "passed": not required_source or required_source in source_haystack,
+                        "mandatory": True,
+                        "observed": source_haystack,
+                        "expected": required_source or None,
+                    },
+                    {
+                        "key": f"asset_campaign_scope:{event.get('id', event_type)}",
+                        "passed": campaign_id not in prohibited_campaigns
+                        and (not permitted_campaigns or campaign_id in permitted_campaigns),
+                        "mandatory": True,
+                        "observed": campaign_id,
+                    },
+                ]
+            )
+            if event_type != "music":
+                logical_checks.append(
+                    {
+                        "key": f"enrichment_duration:{event.get('id', event_type)}",
+                        "passed": duration_ms <= max_insert_ms,
+                        "mandatory": True,
+                        "observed": duration_ms,
+                        "expected": max_insert_ms,
+                    }
+                )
+        if event_type == "music":
+            parameters = event.get("parameters", {})
+            volume = float(parameters.get("volume_db", 0))
+            minimum = float(controls.get("music_volume_min_db", -60))
+            maximum = float(controls.get("music_volume_max_db", 0))
+            logical_checks.extend(
+                [
+                    {
+                        "key": "music_volume_range",
+                        "passed": minimum <= volume <= maximum,
+                        "mandatory": True,
+                        "observed": volume,
+                        "expected": [minimum, maximum],
+                    },
+                    {
+                        "key": "music_speech_ducking",
+                        "passed": not controls.get("ducking_required")
+                        or bool(parameters.get("ducking")),
+                        "mandatory": True,
+                        "observed": bool(parameters.get("ducking")),
+                    },
+                ]
+            )
+    checks.extend(logical_checks)
     for requirement in requirements:
         if requirement["requirement_type"] != "deterministic":
             continue

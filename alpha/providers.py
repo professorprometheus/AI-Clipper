@@ -664,6 +664,9 @@ class Renderer:
         return positions.get(position, positions["bottom_right"])
 
     def probe_media(self, path: Path) -> dict[str, Any]:
+        return self.probe_asset(path, require_video=True)
+
+    def probe_asset(self, path: Path, require_video: bool = False) -> dict[str, Any]:
         ffmpeg = self._ffmpeg()
         if not ffmpeg or not path.exists():
             return {
@@ -688,12 +691,17 @@ class Renderer:
             hours, minutes, seconds = duration_match.groups()
             duration_ms = round((int(hours) * 3600 + int(minutes) * 60 + float(seconds)) * 1000)
         return {
-            "valid": bool(duration_match and video_match),
+            "valid": bool(
+                duration_match and (video_match or (not require_video and "Audio:" in details))
+            ),
             "probe_method": "ffmpeg_stderr",
             "duration_ms": duration_ms,
             "width": int(video_match.group(1)) if video_match else 0,
             "height": int(video_match.group(2)) if video_match else 0,
             "has_audio": "Audio:" in details,
+            "media_kind": "video"
+            if video_match
+            else ("audio" if "Audio:" in details else "unknown"),
         }
 
     def render(self, campaign_id: str, variant_id: str, spec: dict[str, Any]) -> RenderResult:
@@ -751,7 +759,7 @@ class Renderer:
                 )
                 base_label = "base"
                 if source_probe.get("has_audio"):
-                    audio_map = "0:a:0?"
+                    audio_label = "0:a"
                     next_input = 1
                 else:
                     command += [
@@ -760,7 +768,7 @@ class Renderer:
                         "-i",
                         f"anullsrc=channel_layout=stereo:sample_rate=48000:d={duration}",
                     ]
-                    audio_map = "1:a"
+                    audio_label = "1:a"
                     next_input = 2
                 renderer_name = "ffmpeg_authorised_source"
             else:
@@ -775,10 +783,10 @@ class Renderer:
                     f"sine=frequency=440:sample_rate=48000:duration={duration}",
                 ]
                 base_label = "0:v"
-                audio_map = "1:a"
+                audio_label = "1:a"
                 next_input = 2
                 renderer_name = "ffmpeg_fixture"
-            watermark = spec.get("watermark")
+
             captions = spec.get("captions", {})
             if captions.get("enabled"):
                 caption_text = str(captions.get("text") or "ALPHA captions")[:110]
@@ -808,6 +816,190 @@ class Renderer:
                     "box=1:boxcolor=black@0.72:boxborderw=18:x=(w-text_w)/2:y=120[headlined]"
                 )
                 base_label = "headlined"
+
+            events = spec.get("enrichment", {}).get("events", [])
+            visual_types = {
+                "meme_image",
+                "meme_video",
+                "reaction",
+                "broll",
+                "image",
+                "graphic",
+            }
+            visual_number = 0
+            music_inputs: list[tuple[int, dict[str, Any]]] = []
+            sfx_inputs: list[tuple[int, dict[str, Any]]] = []
+            for event in events:
+                event_type = event.get("type")
+                if event_type in {"punch_in", "dynamic_crop", "speaker_focus", "fast_cut"}:
+                    visual_number += 1
+                    start = max(0.0, float(event.get("start_ms", 0)) / 1000)
+                    end = min(duration, start + float(event.get("duration_ms", 0)) / 1000)
+                    scale = max(
+                        1.01, min(1.5, float(event.get("parameters", {}).get("scale", 1.12)))
+                    )
+                    width, height = round(720 * scale), round(1280 * scale)
+                    filters.extend(
+                        [
+                            f"[{base_label}]split=2[punch_under{visual_number}][punch_src{visual_number}]",
+                            f"[punch_src{visual_number}]scale={width}:{height},crop=720:1280"
+                            f"[punch_zoom{visual_number}]",
+                            f"[punch_under{visual_number}][punch_zoom{visual_number}]overlay=0:0:"
+                            f"enable='between(t,{start:.3f},{end:.3f})'[native{visual_number}]",
+                        ]
+                    )
+                    base_label = f"native{visual_number}"
+                    continue
+                if event_type in {
+                    "text_emphasis",
+                    "keyword_highlight",
+                    "pull_quote",
+                    "progress_caption",
+                    "reaction_hold",
+                }:
+                    visual_number += 1
+                    start = max(0.0, float(event.get("start_ms", 0)) / 1000)
+                    end = min(duration, start + float(event.get("duration_ms", 0)) / 1000)
+                    emphasis = str(event.get("parameters", {}).get("text", "KEY POINT"))[:60]
+                    emphasis = (
+                        emphasis.replace("\\", "\\\\").replace("'", "\\'").replace(":", "\\:")
+                    )
+                    filters.append(
+                        f"[{base_label}]drawtext=text='{emphasis}':fontcolor=yellow:fontsize=42:"
+                        "box=1:boxcolor=black@0.72:boxborderw=14:x=(w-text_w)/2:y=160:"
+                        f"enable='between(t,{start:.3f},{end:.3f})'[native{visual_number}]"
+                    )
+                    base_label = f"native{visual_number}"
+                    continue
+                if event_type == "blur_background":
+                    visual_number += 1
+                    start = max(0.0, float(event.get("start_ms", 0)) / 1000)
+                    end = min(duration, start + float(event.get("duration_ms", 0)) / 1000)
+                    filters.append(
+                        f"[{base_label}]boxblur=8:enable='between(t,{start:.3f},{end:.3f})'"
+                        f"[native{visual_number}]"
+                    )
+                    base_label = f"native{visual_number}"
+                    continue
+                if event_type == "freeze_frame":
+                    visual_number += 1
+                    event_duration = min(
+                        duration - 0.1,
+                        max(0.1, float(event.get("duration_ms", 0)) / 1000),
+                    )
+                    start = min(
+                        duration - event_duration - 0.05,
+                        max(0.05, float(event.get("start_ms", 0)) / 1000),
+                    )
+                    post_start = start + event_duration
+                    hold_padding = max(0.0, event_duration - (1 / 24))
+                    filters.extend(
+                        [
+                            f"[{base_label}]split=3[freeze_pre{visual_number}]"
+                            f"[freeze_frame{visual_number}][freeze_post{visual_number}]",
+                            f"[freeze_pre{visual_number}]trim=start=0:end={start:.3f},"
+                            f"setpts=PTS-STARTPTS[freeze_a{visual_number}]",
+                            f"[freeze_frame{visual_number}]trim=start={start:.3f}:"
+                            f"end={start + (1 / 24):.3f},setpts=PTS-STARTPTS,"
+                            f"tpad=stop_mode=clone:stop_duration={hold_padding:.3f}"
+                            f"[freeze_b{visual_number}]",
+                            f"[freeze_post{visual_number}]trim=start={post_start:.3f}:"
+                            f"end={duration:.3f},setpts=PTS-STARTPTS[freeze_c{visual_number}]",
+                            f"[freeze_a{visual_number}][freeze_b{visual_number}]"
+                            f"[freeze_c{visual_number}]concat=n=3:v=1:a=0[native{visual_number}]",
+                        ]
+                    )
+                    base_label = f"native{visual_number}"
+                    continue
+                uri = event.get("asset_uri")
+                if event_type not in visual_types | {"music", "sfx"} or not uri:
+                    continue
+                asset_path = stack.enter_context(self.storage.materialize(uri))
+                input_index = next_input
+                next_input += 1
+                if event_type in {"music", "sfx"}:
+                    command += ["-stream_loop", "-1", "-i", str(asset_path)]
+                    (music_inputs if event_type == "music" else sfx_inputs).append(
+                        (input_index, event)
+                    )
+                    continue
+                if event.get("media_kind") == "video":
+                    command += ["-stream_loop", "-1", "-i", str(asset_path)]
+                else:
+                    command += ["-loop", "1", "-i", str(asset_path)]
+                visual_number += 1
+                start = max(0.0, float(event.get("start_ms", 0)) / 1000)
+                event_duration = max(0.1, float(event.get("duration_ms", 0)) / 1000)
+                end = min(duration, start + event_duration)
+                mode = event.get("mode", "overlay")
+                if mode == "full_screen":
+                    transform = "scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280"
+                    x_pos, y_pos = "0", "0"
+                elif mode == "picture_in_picture":
+                    transform = "scale=300:-1"
+                    x_pos, y_pos = "W-w-28", "28"
+                else:
+                    transform = "scale=360:-1"
+                    x_pos, y_pos = "W-w-28", "80"
+                filters.extend(
+                    [
+                        f"[{input_index}:v]{transform},trim=duration={event_duration:.3f},"
+                        f"setpts=PTS-STARTPTS+{start:.3f}/TB[insert{visual_number}]",
+                        f"[{base_label}][insert{visual_number}]overlay={x_pos}:{y_pos}:"
+                        f"enable='between(t,{start:.3f},{end:.3f})':eof_action=pass"
+                        f"[enriched{visual_number}]",
+                    ]
+                )
+                base_label = f"enriched{visual_number}"
+
+            audio_output: str | None = None
+            if music_inputs:
+                music_index, music_event = music_inputs[0]
+                parameters = music_event.get("parameters", {})
+                volume_db = float(parameters.get("volume_db", -20))
+                fade_in = max(0.0, float(parameters.get("fade_in_ms", 0)) / 1000)
+                fade_out = max(0.0, float(parameters.get("fade_out_ms", 0)) / 1000)
+                music_filters = [f"volume={volume_db}dB", f"atrim=duration={duration:.3f}"]
+                if fade_in:
+                    music_filters.append(f"afade=t=in:st=0:d={fade_in:.3f}")
+                if fade_out:
+                    music_filters.append(
+                        f"afade=t=out:st={max(0, duration - fade_out):.3f}:d={fade_out:.3f}"
+                    )
+                filters.append(f"[{music_index}:a]{','.join(music_filters)}[musicbed]")
+                if parameters.get("ducking", True):
+                    filters.extend(
+                        [
+                            f"[{audio_label}]asplit=2[speechmix][speechside]",
+                            "[musicbed][speechside]sidechaincompress=threshold=0.02:ratio=8:"
+                            "attack=20:release=250[duckedmusic]",
+                            "[speechmix][duckedmusic]amix=inputs=2:duration=first:"
+                            "dropout_transition=0[audio_enriched]",
+                        ]
+                    )
+                else:
+                    filters.append(
+                        f"[{audio_label}][musicbed]amix=inputs=2:duration=first:"
+                        "dropout_transition=0[audio_enriched]"
+                    )
+                audio_output = "audio_enriched"
+            for number, (sfx_index, sfx_event) in enumerate(sfx_inputs, start=1):
+                parameters = sfx_event.get("parameters", {})
+                start_ms = max(0, int(sfx_event.get("start_ms", 0)))
+                sfx_duration = max(0.1, float(sfx_event.get("duration_ms", 500)) / 1000)
+                volume_db = float(parameters.get("volume_db", -8))
+                filters.append(
+                    f"[{sfx_index}:a]atrim=duration={sfx_duration:.3f},volume={volume_db}dB,"
+                    f"adelay={start_ms}|{start_ms}[sfx{number}]"
+                )
+                source_audio = audio_output or audio_label
+                filters.append(
+                    f"[{source_audio}][sfx{number}]amix=inputs=2:duration=first:"
+                    f"dropout_transition=0[audio_sfx{number}]"
+                )
+                audio_output = f"audio_sfx{number}"
+
+            watermark = spec.get("watermark")
             if watermark and watermark.get("enabled", True):
                 configured_asset = watermark.get("asset_uri")
                 asset = (
@@ -823,30 +1015,15 @@ class Renderer:
                 command += ["-i", str(asset)]
                 filters.extend(
                     [
-                        f"[{next_input}:v]scale={size}:-1,format=rgba,colorchannelmixer=aa={opacity}[wm]",
+                        f"[{next_input}:v]scale={size}:-1,format=rgba,"
+                        f"colorchannelmixer=aa={opacity}[wm]",
                         f"[{base_label}][wm]overlay={x}:{y}[v]",
                     ]
                 )
-                command += [
-                    "-filter_complex",
-                    ";".join(filters),
-                    "-map",
-                    "[v]",
-                    "-map",
-                    audio_map,
-                ]
-            elif filters:
-                filters.append(f"[{base_label}]null[v]")
-                command += [
-                    "-filter_complex",
-                    ";".join(filters),
-                    "-map",
-                    "[v]",
-                    "-map",
-                    audio_map,
-                ]
             else:
-                command += ["-map", "0:v", "-map", audio_map]
+                filters.append(f"[{base_label}]null[v]")
+            command += ["-filter_complex", ";".join(filters), "-map", "[v]", "-map"]
+            command += [f"[{audio_output}]" if audio_output else audio_label]
             command += [
                 "-t",
                 f"{duration:.3f}",
