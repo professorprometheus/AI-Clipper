@@ -11,17 +11,21 @@
     #create-form[aria-busy="true"] .submit-status::before{content:"";display:inline-block;width:.75em;height:.75em;margin-right:.55em;border:2px solid #bdc4cd;border-top-color:#2459a7;border-radius:50%;animation:submit-spin .8s linear infinite}
     .global-loading{position:fixed;inset:66px 0 0;z-index:20;display:grid;place-items:center;background:rgba(244,241,234,.78);backdrop-filter:blur(2px);transition:opacity .15s ease}
     .global-loading.hidden{display:none}
-    .global-loading-card{display:flex;align-items:center;gap:13px;min-width:220px;padding:16px 20px;border:1px solid #d9d5cb;border-radius:10px;background:#fff;box-shadow:0 14px 45px rgba(16,24,39,.16);font-weight:750}
+    .global-loading-card{display:flex;align-items:center;gap:13px;min-width:220px;max-width:calc(100vw - 32px);padding:16px 20px;border:1px solid #d9d5cb;border-radius:10px;background:#fff;box-shadow:0 14px 45px rgba(16,24,39,.16);font-weight:750}.global-loading-card span:last-child{overflow-wrap:anywhere}
     .global-loading-spinner{width:22px;height:22px;flex:0 0 auto;border:3px solid #d7dce3;border-top-color:#2459a7;border-radius:50%;animation:submit-spin .8s linear infinite}
+    .status.active,.status.ready{background:#dcefe7;color:var(--green)}.status.queued{background:#e8edf5;color:var(--blue)}.status.retry{background:#fff2cc;color:#7a5b00}.status.failed{background:#f5dddd;color:var(--red)}.status.draft{background:#eceae4;color:#5f6470}
+    .job-summary{font-weight:750;margin:10px 0 0}.processing-panel{margin-bottom:22px;border-left:5px solid var(--blue)}.processing-panel.active{border-left-color:var(--green)}.processing-panel.retry{border-left-color:var(--accent)}.processing-panel.failed{border-left-color:var(--red)}.processing-panel.draft{border-left-color:#8b9099}.processing-head{display:flex;justify-content:space-between;align-items:start;gap:20px}.processing-head h3,.empty-state h3,.error-state h3,.skeleton-panel h3,.ready-panel h3{font:700 24px Georgia,serif;margin:5px 0}.progress.large{height:9px;margin:20px 0 8px}
+    .inline-spinner{display:inline-block;width:24px;height:24px;flex:0 0 auto;border:3px solid #d7dce3;border-top-color:var(--blue);border-radius:50%;animation:submit-spin .8s linear infinite}.skeleton-panel{text-align:center;padding:54px}.skeleton-panel .inline-spinner{width:32px;height:32px}.empty-state,.error-state{grid-column:1/-1;text-align:center;padding:46px}.error-state{border-color:#e8bcbc}.error-state p{color:var(--red)}.sr-only{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}.video-frame{position:relative}.video-loading{display:none;position:absolute;inset:0;z-index:2;align-items:center;justify-content:center;gap:8px;background:#111827;color:#dbe4f2;font-size:12px}.video-frame.loading .video-loading,.video-frame.media-error .video-loading{display:flex}.video-frame.media-error .inline-spinner{display:none}
     @keyframes submit-spin{to{transform:rotate(360deg)}}
-    @media (prefers-reduced-motion:reduce){#create-form[aria-busy="true"] .submit-status::before,.global-loading-spinner{animation:none}}
+    @media (prefers-reduced-motion:reduce){#create-form[aria-busy="true"] .submit-status::before,.global-loading-spinner,.inline-spinner{animation:none}}
+    @media(max-width:760px){.global-loading-card{min-width:0;width:calc(100vw - 32px)}.processing-head{align-items:center}.processing-panel .actions{align-items:stretch;flex-direction:column}.processing-panel .actions button{width:100%}}
   </style>
 </head>
 <body>
   <header class="topbar">
     <a class="brand" href="/"><span>α</span> ALPHA</a>
     <nav><button class="nav-button active" data-view="campaigns">Campaigns</button><button class="nav-button" data-view="ledger">Research Ledger</button></nav>
-    <div class="mode">LOCAL FIXTURE MODE</div><button id="logout" class="nav-button hidden">Sign out</button>
+    <div id="provider-mode" class="mode">PROVIDER MODE</div><button id="logout" class="nav-button hidden">Sign out</button>
   </header>
   <div id="global-loading" class="global-loading hidden" role="status" aria-live="polite" aria-atomic="true">
     <div class="global-loading-card"><span class="global-loading-spinner" aria-hidden="true"></span><span id="global-loading-message">Loading…</span></div>

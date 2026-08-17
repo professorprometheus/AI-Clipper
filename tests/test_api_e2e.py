@@ -18,7 +18,9 @@ def test_campaign_submit_shows_accessible_progress_and_prevents_duplicates(clien
     assert 'id="global-loading-message"' in page.text
     assert "let pendingRequests=0" in script.text
     assert script.text.count("beginLoading(requestMessage(") == 2
-    assert script.text.count("finally{endLoading()}") == 2
+    assert "finally{if(loading)endLoading()}" in script.text
+    assert "loading:!background" in script.text
+    assert "function apiError" in script.text
     assert "button.disabled=true" in script.text
     assert "if($('#create-submit').disabled)return" in script.text
     for message in (
@@ -35,9 +37,79 @@ def test_campaign_submit_shows_accessible_progress_and_prevents_duplicates(clien
         "Loading campaign review",
         "Loading research ledger",
         "Saving review and rendering changes",
-        "Processing campaign stages",
+        "Worker active",
+        "Retry scheduled",
+        "Delete draft",
+        "Refresh status",
     ):
         assert message in script.text
+    assert "Run remaining stages now" not in script.text
+
+
+def test_draft_deletion_removes_private_objects_and_submitted_campaigns_are_protected(client, app):
+    created = client.post("/api/campaigns", json=campaign_payload())
+    assert created.status_code == 201
+    campaign_id = created.json()["id"]
+    campaign = client.get(f"/api/campaigns/{campaign_id}").json()
+    watermark_path = Path(campaign["watermark"]["asset_uri"])
+    assert watermark_path.exists()
+
+    asset = client.post(
+        f"/api/campaigns/{campaign_id}/assets",
+        files={"asset": ("owned.ppm", b"P6\n1 1\n255\n\xff\x00\x00", "image/x-portable-pixmap")},
+        data={
+            "asset_type": "meme_image",
+            "title": "Owned reaction",
+            "licence": "User owned",
+            "permitted_commercial_use": "true",
+            "rights_attestation": "User confirms permission and commercial rights.",
+        },
+    )
+    assert asset.status_code == 201, asset.text
+    asset_path = Path(asset.json()["file_uri"])
+    assert asset_path.exists()
+
+    deleted = client.delete(f"/api/campaigns/{campaign_id}")
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["deleted"] is True
+    assert deleted.json()["object_cleanup_failures"] == []
+    assert not watermark_path.exists()
+    assert not asset_path.exists()
+    assert client.get(f"/api/campaigns/{campaign_id}").status_code == 404
+    audit = app.state.db.one(
+        "SELECT action FROM audit_log WHERE entity_id=? ORDER BY created_at DESC LIMIT 1",
+        (campaign_id,),
+    )
+    assert audit["action"] == "draft_deleted"
+
+    submitted_id = client.post("/api/campaigns", json=campaign_payload()).json()["id"]
+    client.post(f"/api/campaigns/{submitted_id}/submit")
+    blocked = client.delete(f"/api/campaigns/{submitted_id}")
+    assert blocked.status_code == 409
+    assert client.get(f"/api/campaigns/{submitted_id}").status_code == 200
+
+
+def test_failed_job_can_be_requeued_from_its_checkpoint(client, app):
+    campaign_id = client.post("/api/campaigns", json=campaign_payload()).json()["id"]
+    job = client.post(f"/api/campaigns/{campaign_id}/submit").json()
+    app.state.db.execute(
+        "UPDATE pipeline_jobs SET status='failed',current_stage='social_research',attempts=5,"
+        "error_json=? WHERE id=?",
+        ('{"message":"temporary provider outage"}', job["id"]),
+    )
+
+    detail = client.get(f"/api/campaigns/{campaign_id}").json()
+    assert detail["job"]["error"]["message"] == "temporary provider outage"
+    retried = client.post(f"/api/campaigns/{campaign_id}/retry")
+    assert retried.status_code == 202, retried.text
+    assert retried.json()["status"] == "queued"
+    assert retried.json()["current_stage"] == "social_research"
+    assert retried.json()["attempts"] == 0
+    assert (
+        app.state.db.one("SELECT status FROM campaigns WHERE id=?", (campaign_id,))["status"]
+        == "processing"
+    )
+    assert client.post(f"/api/campaigns/{campaign_id}/retry").status_code == 409
 
 
 def test_end_to_end_fixture_flow(client, app):

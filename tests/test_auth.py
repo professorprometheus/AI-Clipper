@@ -30,6 +30,7 @@ def test_production_session_authentication_and_csrf(settings, monkeypatch):
             "authenticated": False,
             "email": None,
             "expires_at": None,
+            "provider_mode": "fixture",
         }
         wrong = client.post(
             "/api/auth/login",

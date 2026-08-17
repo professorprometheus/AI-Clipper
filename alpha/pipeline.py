@@ -208,6 +208,36 @@ class Pipeline:
         self.db.audit("campaign", campaign_id, "pipeline_enqueued", {"job_id": job_id})
         return self.db.one("SELECT * FROM pipeline_jobs WHERE id=?", (job_id,)) or {}
 
+    def retry_failed(self, campaign_id: str) -> dict[str, Any]:
+        job = self.db.one(
+            "SELECT * FROM pipeline_jobs WHERE campaign_id=? ORDER BY created_at DESC LIMIT 1",
+            (campaign_id,),
+        )
+        if not job:
+            raise KeyError("campaign job not found")
+        if job["status"] != "failed":
+            raise PermissionError("only a failed campaign job can be retried")
+        timestamp = now()
+        updated = self.db.execute(
+            "UPDATE pipeline_jobs SET status='queued',attempts=0,error_json=NULL,available_at=?,"
+            "worker_token=NULL,lease_expires_at=NULL,heartbeat_at=NULL,updated_at=? "
+            "WHERE id=? AND status='failed'",
+            (timestamp, timestamp, job["id"]),
+        )
+        if not updated:
+            raise PermissionError("campaign job is no longer failed")
+        self.db.execute(
+            "UPDATE campaigns SET status='processing',updated_at=? WHERE id=?",
+            (timestamp, campaign_id),
+        )
+        self.db.audit(
+            "campaign",
+            campaign_id,
+            "failed_stage_requeued",
+            {"job_id": job["id"], "stage": job["current_stage"]},
+        )
+        return self.db.one("SELECT * FROM pipeline_jobs WHERE id=?", (job["id"],)) or {}
+
     def acquire(self, worker_token: str) -> dict[str, Any] | None:
         timestamp = now()
         lease = (datetime.now(UTC) + timedelta(seconds=self.settings.lease_seconds)).isoformat()

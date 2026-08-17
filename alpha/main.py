@@ -122,7 +122,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @api.get("/api/auth/session")
     def auth_session(request: Request):
         if not settings.require_auth:
-            return {"required": False, "authenticated": True, "email": None}
+            return {
+                "required": False,
+                "authenticated": True,
+                "email": None,
+                "provider_mode": settings.provider_mode,
+            }
         session_token = request.cookies.get("alpha_session", "")
         session = (
             db.one(
@@ -138,6 +143,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "authenticated": bool(session),
             "email": session["email"] if session else None,
             "expires_at": session["expires_at"] if session else None,
+            "provider_mode": settings.provider_mode,
         }
 
     @api.post("/api/auth/login")
@@ -223,6 +229,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @api.get("/api/campaigns/{campaign_id}")
     def get_campaign(campaign_id: str):
         return service.get_campaign(campaign_id)
+
+    @api.delete("/api/campaigns/{campaign_id}")
+    def delete_campaign(campaign_id: str):
+        return service.delete_draft_campaign(campaign_id)
 
     @api.patch("/api/campaigns/{campaign_id}")
     def edit_campaign(campaign_id: str, changes: dict[str, Any]):
@@ -322,6 +332,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def submit_campaign(campaign_id: str):
         service.get_campaign(campaign_id)
         return pipeline.enqueue(campaign_id)
+
+    @api.post("/api/campaigns/{campaign_id}/retry", status_code=202)
+    def retry_campaign(campaign_id: str):
+        service.get_campaign(campaign_id)
+        return pipeline.retry_failed(campaign_id)
 
     @api.post("/api/dev/worker/run-one")
     def run_worker_once():

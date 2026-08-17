@@ -382,7 +382,90 @@ class AlphaService:
             "SELECT * FROM pipeline_jobs WHERE campaign_id=? ORDER BY created_at DESC LIMIT 1",
             (campaign_id,),
         )
+        if campaign["job"]:
+            campaign["job"]["checkpoint"] = load(
+                campaign["job"].get("checkpoint_json"), {"completed_stages": []}
+            )
+            campaign["job"]["error"] = load(campaign["job"].get("error_json"), None)
         return campaign
+
+    def delete_draft_campaign(self, campaign_id: str) -> dict[str, Any]:
+        campaign = self.db.one("SELECT * FROM campaigns WHERE id=?", (campaign_id,))
+        if not campaign:
+            raise KeyError("campaign not found")
+        if campaign["status"] != "draft":
+            raise PermissionError("only draft campaigns can be deleted")
+        if self.db.one("SELECT id FROM pipeline_jobs WHERE campaign_id=?", (campaign_id,)):
+            raise PermissionError("a submitted campaign cannot be deleted")
+
+        object_uris: set[str] = set()
+        watermark = load(campaign.get("watermark_json"), None) or {}
+        if watermark.get("asset_uri"):
+            object_uris.add(watermark["asset_uri"])
+        for row in self.db.all(
+            "SELECT file_uri AS uri FROM assets WHERE campaign_id=? "
+            "UNION SELECT si.media_uri AS uri FROM source_imports si JOIN approved_sources s "
+            "ON s.id=si.approved_source_id WHERE s.campaign_id=? "
+            "UNION SELECT lm.media_uri AS uri FROM linked_source_media lm JOIN approved_sources s "
+            "ON s.id=lm.approved_source_id WHERE s.campaign_id=?",
+            (campaign_id, campaign_id, campaign_id),
+        ):
+            if row.get("uri"):
+                object_uris.add(row["uri"])
+
+        with self.db.transaction(immediate=True) as connection:
+            connection.execute(
+                "DELETE FROM source_imports WHERE approved_source_id IN "
+                "(SELECT id FROM approved_sources WHERE campaign_id=?)",
+                (campaign_id,),
+            )
+            connection.execute(
+                "DELETE FROM linked_source_media WHERE approved_source_id IN "
+                "(SELECT id FROM approved_sources WHERE campaign_id=?)",
+                (campaign_id,),
+            )
+            for table in (
+                "requirement_revisions",
+                "research_imports",
+                "provider_events",
+                "campaign_accounts",
+                "research_targets",
+                "successful_examples",
+                "campaign_requirements",
+                "assets",
+                "approved_sources",
+            ):
+                connection.execute(f"DELETE FROM {table} WHERE campaign_id=?", (campaign_id,))
+            deleted = connection.execute(
+                "DELETE FROM campaigns WHERE id=? AND status='draft'", (campaign_id,)
+            ).rowcount
+            if not deleted:
+                raise PermissionError("campaign changed and is no longer a deletable draft")
+            connection.execute(
+                "INSERT INTO audit_log(id,entity_type,entity_id,action,details_json,created_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (
+                    uid(),
+                    "campaign",
+                    campaign_id,
+                    "draft_deleted",
+                    dump({"name": campaign["name"], "object_count": len(object_uris)}),
+                    now(),
+                ),
+            )
+
+        cleanup_failures: list[str] = []
+        for uri in sorted(object_uris):
+            try:
+                self.pipeline.providers.storage.delete(uri)
+            except Exception:
+                cleanup_failures.append(uri)
+        return {
+            "id": campaign_id,
+            "deleted": True,
+            "objects_deleted": len(object_uris) - len(cleanup_failures),
+            "object_cleanup_failures": cleanup_failures,
+        }
 
     def import_asset(
         self,
@@ -749,12 +832,21 @@ class AlphaService:
         return {"variants": len(variants), "passed": passed, "revoked_approvals": revoked}
 
     def list_campaigns(self) -> list[dict[str, Any]]:
-        return self.db.all(
+        campaigns = self.db.all(
             "SELECT c.*, (SELECT COUNT(*) FROM approved_sources s WHERE s.campaign_id=c.id) AS source_count, "
             "(SELECT COUNT(*) FROM clip_variants v JOIN candidate_moments m ON m.id=v.candidate_id WHERE m.campaign_id=c.id) AS variant_count "
             ",(SELECT j.current_stage FROM pipeline_jobs j WHERE j.campaign_id=c.id ORDER BY j.created_at DESC LIMIT 1) AS current_stage "
+            ",(SELECT j.status FROM pipeline_jobs j WHERE j.campaign_id=c.id ORDER BY j.created_at DESC LIMIT 1) AS job_status "
+            ",(SELECT j.checkpoint_json FROM pipeline_jobs j WHERE j.campaign_id=c.id ORDER BY j.created_at DESC LIMIT 1) AS job_checkpoint_json "
+            ",(SELECT j.error_json FROM pipeline_jobs j WHERE j.campaign_id=c.id ORDER BY j.created_at DESC LIMIT 1) AS job_error_json "
             "FROM campaigns c ORDER BY c.created_at DESC"
         )
+        for campaign in campaigns:
+            campaign["job_checkpoint"] = load(
+                campaign.pop("job_checkpoint_json"), {"completed_stages": []}
+            )
+            campaign["job_error"] = load(campaign.pop("job_error_json"), None)
+        return campaigns
 
     def edit_campaign(self, campaign_id: str, changes: dict[str, Any]) -> dict[str, Any]:
         campaign = self.db.one("SELECT * FROM campaigns WHERE id=?", (campaign_id,))

@@ -267,3 +267,20 @@ Alternatives considered:
 Random stock decoration, blind scraping, mutable event lists and AI-generated feature assertions were rejected because they weaken rights compliance, reproducibility and experimental validity.
 
 ---
+
+### ADR-015 — Observable background work without browser-owned execution
+Status: Accepted
+
+Context:
+The campaign page exposed a development-only “run remaining stages” action even though production work is scheduled remotely. It also showed no distinction between queued, leased, retrying and terminally failed jobs, so a blank or static page could make durable work look stalled.
+
+Decision:
+Treat persisted job state as the only user-facing source of processing truth. Poll active campaign detail every five seconds and the campaign list every ten seconds without showing the foreground loading overlay. Present checkpoint progress and explicit queued/leased/retry/failed explanations. Remove the browser-owned stage runner from the product UI; allow only terminal failed jobs to be deliberately requeued from their existing checkpoint. Keep drafts separate: they can be submitted later or permanently deleted, but deletion is rejected after any pipeline job exists and removes campaign-owned storage objects.
+
+Consequences:
+Closing or refreshing the browser cannot alter execution, scheduled workers remain automatic, and users can distinguish waiting from active processing or a genuine failure. Polling adds small read load. Draft deletion is intentionally irreversible and retains only an audit tombstone; connected account definitions remain reusable.
+
+Alternatives considered:
+Running the worker synchronously from the browser, displaying an indefinite spinner for multi-hour work, and allowing deletion of submitted campaign history were rejected because they contradict unattended processing, conceal durable state or destroy lineage.
+
+---
