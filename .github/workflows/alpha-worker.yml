@@ -22,6 +22,8 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
+      - name: Install FFmpeg with text and overlay filters
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core
       - run: pip install .
       - name: Process up to three sequential stages
         env:

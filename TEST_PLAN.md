@@ -115,6 +115,7 @@ The test does not need to run for 72 wall-clock hours. It must prove the archite
 - `tests/test_enrichment.py`: the exact multi-action natural-language edit removes the meme, lowers music by 6 dB, adds a punch-in, renders a child, persists plan strategy features and leaves the parent byte-for-byte unchanged.
 - `tests/test_enrichment.py`: prohibited, commercially disallowed, unlicensed and missing enrichment objects block deterministic QA.
 - `tests/test_domain.py`: parsing and applying removal, volume, timing and native-event changes remains deterministic.
+- Linux CI, the scheduled worker and the production image install distribution FFmpeg with font/text/overlay support; CI must execute the real render tests instead of relying on the reduced bundled fallback.
 
 Manual review smoke should confirm the campaign controls, authorised-asset intake and timestamped enrichment timeline are legible on desktop/mobile before a production campaign.
 

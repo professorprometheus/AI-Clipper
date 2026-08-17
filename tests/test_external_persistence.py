@@ -125,6 +125,8 @@ def test_production_blueprint_is_diskless_and_worker_is_bounded():
     root = Path(__file__).resolve().parent.parent
     blueprint = (root / "render.yaml").read_text(encoding="utf-8")
     workflow = (root / ".github" / "workflows" / "alpha-worker.yml").read_text(encoding="utf-8")
+    ci_workflow = (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
     assert "plan: free" in blueprint
     assert "disk:" not in blueprint
     for key in (
@@ -139,3 +141,6 @@ def test_production_blueprint_is_diskless_and_worker_is_bounded():
     assert "ALPHA_RUN_EMBEDDED_WORKER" in blueprint
     assert 'cron: "17 * * * *"' in workflow
     assert "python -m alpha.worker --max-stages 3" in workflow
+    assert "apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core" in workflow
+    assert "apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core" in ci_workflow
+    assert "apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core" in dockerfile

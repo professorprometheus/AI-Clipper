@@ -1050,7 +1050,19 @@ class Renderer:
                 "-y",
                 str(output),
             ]
-            subprocess.run(command, check=True, timeout=90, capture_output=True)
+            try:
+                subprocess.run(
+                    command,
+                    check=True,
+                    timeout=90,
+                    capture_output=True,
+                    text=True,
+                )
+            except subprocess.CalledProcessError as exc:
+                stderr = (exc.stderr or "").strip().replace("\x00", "")[-2000:]
+                raise RuntimeError(
+                    f"FFmpeg render failed: {stderr or 'no stderr returned'}"
+                ) from exc
             content = output.read_bytes()
             probe = self.probe_media(output)
             uri = self.storage.put_file(
