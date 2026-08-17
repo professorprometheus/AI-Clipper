@@ -133,6 +133,27 @@ def test_bounded_backoff_and_terminal_failure_email_are_real(client, app):
     assert "[REDACTED]" in failed_job["error_json"]
 
 
+def test_deterministic_failure_does_not_burn_retry_invocations(client, app):
+    campaign_id = client.post("/api/campaigns", json=campaign_payload()).json()["id"]
+    job = client.post(f"/api/campaigns/{campaign_id}/submit").json()
+    pipeline = app.state.pipeline
+
+    def invalid_campaign(_campaign: str, _job_id: str):
+        raise ValueError("approved source has no usable transcript")
+
+    pipeline.stage_handlers["validate_campaign"] = invalid_campaign
+    result = pipeline.run_once("deterministic-failure-worker")
+
+    assert result["status"] == "failed"
+    failed_job = app.state.db.one("SELECT * FROM pipeline_jobs WHERE id=?", (job["id"],))
+    assert failed_job["attempts"] == 1
+    assert failed_job["status"] == "failed"
+    assert app.state.db.one(
+        "SELECT id FROM notifications WHERE campaign_id=? AND notification_type='failed_needs_attention'",
+        (campaign_id,),
+    )
+
+
 def test_missing_watermark_blocks_until_audited_rule_revision(client, app):
     payload = campaign_payload(watermark=False)
     campaign_id = client.post("/api/campaigns", json=payload).json()["id"]

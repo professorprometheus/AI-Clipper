@@ -8,6 +8,7 @@ import pytest
 from alpha.config import Settings
 from alpha.db import Database, PostgresConnection
 from alpha.providers import Renderer, S3StorageAdapter
+from alpha.worker import _is_terminal_failure
 
 
 class MemoryS3Client:
@@ -147,3 +148,9 @@ def test_production_blueprint_is_diskless_and_worker_is_bounded():
     assert "apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core" in workflow
     assert "apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core" in ci_workflow
     assert "apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core" in dockerfile
+
+
+def test_scheduled_worker_marks_terminal_stage_failure_as_process_failure():
+    assert _is_terminal_failure({"status": "failed", "stage": "rank_candidates"})
+    assert not _is_terminal_failure({"status": "retry", "stage": "social_research"})
+    assert not _is_terminal_failure(None)

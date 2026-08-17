@@ -371,7 +371,12 @@ class Pipeline:
             stop_heartbeat.set()
             heartbeat_thread.join(timeout=max(1.0, self.settings.lease_seconds))
             attempts = int(job["attempts"]) + 1
-            status = "failed" if attempts >= self.settings.max_job_attempts else "retry"
+            deterministic_failure = isinstance(exc, (KeyError, PermissionError, ValueError))
+            status = (
+                "failed"
+                if deterministic_failure or attempts >= self.settings.max_job_attempts
+                else "retry"
+            )
             backoff_seconds = min(
                 300.0,
                 max(0.0, self.settings.retry_base_seconds) * (2 ** max(0, attempts - 1)),

@@ -13,6 +13,10 @@ from .pipeline import Pipeline
 logger = logging.getLogger(__name__)
 
 
+def _is_terminal_failure(result: dict | None) -> bool:
+    return bool(result and result.get("status") == "failed")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the durable ALPHA worker")
     parser.add_argument(
@@ -36,6 +40,12 @@ def main() -> None:
         result = pipeline.run_once(token)
         if result is not None:
             completed += 1
+        if _is_terminal_failure(result):
+            logger.error(
+                "ALPHA worker stopped after a terminal failure in stage %s.",
+                result.get("stage", "unknown"),
+            )
+            raise SystemExit(1)
         if args.once or (args.max_stages > 0 and completed >= args.max_stages):
             logger.info(
                 "ALPHA worker completed %s checkpointed stage invocation(s); stage limit reached.",
