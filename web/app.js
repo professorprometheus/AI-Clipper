@@ -2,20 +2,46 @@ const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 const stages = ['validate_campaign','resolve_sources','ingest_sources','analyse_successful_examples','social_research','synthesize_strategy','discover_candidates','rank_candidates','plan_enrichment','render','qa','review_ready'];
 const state = {campaignId: new URLSearchParams(location.search).get('campaign')};
+let pendingRequests=0;let loadingHideTimer=null;
+
+function requestMessage(path,method='GET'){
+  if(path.includes('/worker/'))return 'Processing campaign stages…';
+  if(path.includes('/review'))return method==='POST'?'Saving review and rendering changes…':'Loading campaign review…';
+  if(path.includes('/publish'))return 'Preparing approved export…';
+  if(path.includes('/research-ledger'))return 'Loading research ledger…';
+  if(path.includes('/feedback'))return 'Saving feedback…';
+  if(path.includes('/performance'))return 'Saving performance data…';
+  if(path.includes('/auth/login'))return 'Signing in…';
+  if(path.includes('/auth/logout'))return 'Signing out…';
+  if(path.includes('/submit'))return 'Starting background processing…';
+  if(path.includes('/sources/import'))return 'Uploading authorised source…';
+  if(path.includes('/assets'))return method==='POST'?'Uploading enrichment asset…':'Loading asset library…';
+  if(path.includes('/campaigns/'))return method==='GET'?'Loading campaign data…':'Saving campaign data…';
+  if(path==='/api/campaigns')return method==='GET'?'Loading campaigns…':'Creating campaign…';
+  return 'Loading data…';
+}
+function beginLoading(message){pendingRequests+=1;clearTimeout(loadingHideTimer);$('#global-loading-message').textContent=message;$('#global-loading').classList.remove('hidden');$('main').setAttribute('aria-busy','true')}
+function endLoading(){pendingRequests=Math.max(0,pendingRequests-1);if(pendingRequests)return;loadingHideTimer=setTimeout(()=>{if(pendingRequests===0){$('#global-loading').classList.add('hidden');$('main').removeAttribute('aria-busy')}},120)}
 
 async function api(path, options={}) {
-  const csrf=document.cookie.split('; ').find(value=>value.startsWith('alpha_csrf='))?.split('=').slice(1).join('=');
-  const response = await fetch(path,{headers:{'content-type':'application/json',...(csrf?{'x-alpha-csrf':decodeURIComponent(csrf)}:{}),...(options.headers||{})},...options});
-  const data = await response.json().catch(()=>({}));
-  if(!response.ok) throw new Error(data.detail || `Request failed (${response.status})`);
-  return data;
+  beginLoading(requestMessage(path,options.method||'GET'));
+  try{
+    const csrf=document.cookie.split('; ').find(value=>value.startsWith('alpha_csrf='))?.split('=').slice(1).join('=');
+    const response = await fetch(path,{headers:{'content-type':'application/json',...(csrf?{'x-alpha-csrf':decodeURIComponent(csrf)}:{}),...(options.headers||{})},...options});
+    const data = await response.json().catch(()=>({}));
+    if(!response.ok) throw new Error(data.detail || `Request failed (${response.status})`);
+    return data;
+  }finally{endLoading()}
 }
 async function uploadApi(path, body) {
-  const csrf=document.cookie.split('; ').find(value=>value.startsWith('alpha_csrf='))?.split('=').slice(1).join('=');
-  const response = await fetch(path,{method:'POST',headers:{...(csrf?{'x-alpha-csrf':decodeURIComponent(csrf)}:{})},body});
-  const data = await response.json().catch(()=>({}));
-  if(!response.ok) throw new Error(data.detail || `Upload failed (${response.status})`);
-  return data;
+  beginLoading(requestMessage(path,'POST'));
+  try{
+    const csrf=document.cookie.split('; ').find(value=>value.startsWith('alpha_csrf='))?.split('=').slice(1).join('=');
+    const response = await fetch(path,{method:'POST',headers:{...(csrf?{'x-alpha-csrf':decodeURIComponent(csrf)}:{})},body});
+    const data = await response.json().catch(()=>({}));
+    if(!response.ok) throw new Error(data.detail || `Upload failed (${response.status})`);
+    return data;
+  }finally{endLoading()}
 }
 function notice(message,error=false){const el=$('#notice');el.textContent=message;el.classList.toggle('error',error);el.classList.remove('hidden');setTimeout(()=>el.classList.add('hidden'),6000)}
 function lines(value){return value.split(/\r?\n/).map(v=>v.trim()).filter(Boolean)}

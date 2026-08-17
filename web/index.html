@@ -9,8 +9,12 @@
     #create-submit:disabled{cursor:wait;opacity:.68;box-shadow:none}
     .submit-status{min-height:1.5em}
     #create-form[aria-busy="true"] .submit-status::before{content:"";display:inline-block;width:.75em;height:.75em;margin-right:.55em;border:2px solid #bdc4cd;border-top-color:#2459a7;border-radius:50%;animation:submit-spin .8s linear infinite}
+    .global-loading{position:fixed;inset:66px 0 0;z-index:20;display:grid;place-items:center;background:rgba(244,241,234,.78);backdrop-filter:blur(2px);transition:opacity .15s ease}
+    .global-loading.hidden{display:none}
+    .global-loading-card{display:flex;align-items:center;gap:13px;min-width:220px;padding:16px 20px;border:1px solid #d9d5cb;border-radius:10px;background:#fff;box-shadow:0 14px 45px rgba(16,24,39,.16);font-weight:750}
+    .global-loading-spinner{width:22px;height:22px;flex:0 0 auto;border:3px solid #d7dce3;border-top-color:#2459a7;border-radius:50%;animation:submit-spin .8s linear infinite}
     @keyframes submit-spin{to{transform:rotate(360deg)}}
-    @media (prefers-reduced-motion:reduce){#create-form[aria-busy="true"] .submit-status::before{animation:none}}
+    @media (prefers-reduced-motion:reduce){#create-form[aria-busy="true"] .submit-status::before,.global-loading-spinner{animation:none}}
   </style>
 </head>
 <body>
@@ -19,6 +23,9 @@
     <nav><button class="nav-button active" data-view="campaigns">Campaigns</button><button class="nav-button" data-view="ledger">Research Ledger</button></nav>
     <div class="mode">LOCAL FIXTURE MODE</div><button id="logout" class="nav-button hidden">Sign out</button>
   </header>
+  <div id="global-loading" class="global-loading hidden" role="status" aria-live="polite" aria-atomic="true">
+    <div class="global-loading-card"><span class="global-loading-spinner" aria-hidden="true"></span><span id="global-loading-message">Loading…</span></div>
+  </div>
   <main>
     <section id="login-view" class="hidden"><div class="panel login-panel"><p class="eyebrow">Protected workspace</p><h2>Sign in to ALPHA</h2><form id="login-form"><label>Email<input name="email" type="email" autocomplete="username" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><button class="primary" type="submit">Sign in</button></form></div></section>
     <section id="campaigns-view">

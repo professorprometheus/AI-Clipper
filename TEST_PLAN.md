@@ -103,7 +103,7 @@ The test does not need to run for 72 wall-clock hours. It must prove the archite
 - `tests/test_ops.py`: deployment diagnostics cover migrations, storage round-trip, FFmpeg and authentication configuration.
 - `tests/test_email.py`: Resend payload/auth/idempotency contract, safe provider errors, automatic provider selection and fail-closed configuration.
 - `tests/test_api_e2e.py`: review-ready email contains the campaign name, expanded source count, research summary, candidate count, clip count and review URL.
-- `tests/test_api_e2e.py`: campaign submission exposes an accessible live-status region, immediately disables the action to prevent duplicates, reports validation/upload/queueing phases and restores the action after failure.
+- `tests/test_api_e2e.py`: campaign submission exposes an accessible live-status region, immediately disables the action to prevent duplicates, reports validation/upload/queueing phases and restores the action after failure. A centralized reference-counted overlay wraps both JSON and upload requests and exposes operation-specific loading messages for campaigns, review, research and worker actions.
 - `tests/test_live_providers.py`: YouTube playlist pagination/dedup, real metadata mapping, WebVTT timestamps, renewable caption OAuth contract, YouTube current-search evidence, TikTok oEmbed/approved Research API contracts, wider-web fallback/provenance and fail-closed live configuration.
 - `tests/test_api_e2e.py`: rights-attested media links to an exact approved YouTube/playlist video ID and supplies the transcript/render asset for that source item.
 - `tests/test_domain.py`: structured edit parsing/application and strict separation of AI-evaluated requirements from deterministic QA.

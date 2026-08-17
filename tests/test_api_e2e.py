@@ -14,6 +14,11 @@ def test_campaign_submit_shows_accessible_progress_and_prevents_duplicates(clien
     assert 'id="create-submit"' in page.text
     assert 'id="create-status"' in page.text
     assert 'role="status" aria-live="polite"' in page.text
+    assert 'id="global-loading"' in page.text
+    assert 'id="global-loading-message"' in page.text
+    assert "let pendingRequests=0" in script.text
+    assert script.text.count("beginLoading(requestMessage(") == 2
+    assert script.text.count("finally{endLoading()}") == 2
     assert "button.disabled=true" in script.text
     assert "if($('#create-submit').disabled)return" in script.text
     for message in (
@@ -23,6 +28,14 @@ def test_campaign_submit_shows_accessible_progress_and_prevents_duplicates(clien
         "Uploading enrichment asset",
         "Starting durable background processing",
         "Background processing has started",
+    ):
+        assert message in script.text
+    for message in (
+        "Loading campaigns",
+        "Loading campaign review",
+        "Loading research ledger",
+        "Saving review and rendering changes",
+        "Processing campaign stages",
     ):
         assert message in script.text
 
