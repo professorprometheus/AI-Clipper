@@ -5,6 +5,13 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>ALPHA — research-led clipping</title>
   <link rel="stylesheet" href="/styles.css">
+  <style>
+    #create-submit:disabled{cursor:wait;opacity:.68;box-shadow:none}
+    .submit-status{min-height:1.5em}
+    #create-form[aria-busy="true"] .submit-status::before{content:"";display:inline-block;width:.75em;height:.75em;margin-right:.55em;border:2px solid #bdc4cd;border-top-color:#2459a7;border-radius:50%;animation:submit-spin .8s linear infinite}
+    @keyframes submit-spin{to{transform:rotate(360deg)}}
+    @media (prefers-reduced-motion:reduce){#create-form[aria-busy="true"] .submit-status::before{animation:none}}
+  </style>
 </head>
 <body>
   <header class="topbar">
@@ -76,7 +83,7 @@ attention hooks</textarea></label>
             <label>Opacity (%)<input name="watermark_opacity" type="number" min="0" max="100" value="85"></label>
             <label>Padding (px)<input name="watermark_padding" type="number" min="0" max="500" value="24"></label>
           </div></fieldset>
-          <div class="actions"><button class="primary" type="submit">Create and submit</button><span class="muted">You can close this page after submitting.</span></div>
+          <div class="actions"><button id="create-submit" class="primary" type="submit">Create and submit</button><span id="create-status" class="submit-status muted" role="status" aria-live="polite">You can close this page after submitting.</span></div>
         </form>
       </section>
       <section id="campaign-detail" class="hidden"></section>

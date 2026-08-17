@@ -6,6 +6,27 @@ from pathlib import Path
 from .conftest import campaign_payload, generated_source_video
 
 
+def test_campaign_submit_shows_accessible_progress_and_prevents_duplicates(client):
+    page = client.get("/")
+    script = client.get("/app.js")
+    assert page.status_code == 200
+    assert script.status_code == 200
+    assert 'id="create-submit"' in page.text
+    assert 'id="create-status"' in page.text
+    assert 'role="status" aria-live="polite"' in page.text
+    assert "button.disabled=true" in script.text
+    assert "if($('#create-submit').disabled)return" in script.text
+    for message in (
+        "Validating campaign details",
+        "Creating the campaign",
+        "Uploading source video",
+        "Uploading enrichment asset",
+        "Starting durable background processing",
+        "Background processing has started",
+    ):
+        assert message in script.text
+
+
 def test_end_to_end_fixture_flow(client, app):
     assert client.get("/api/health").json()["status"] == "ok"
     selected_account = client.post(
