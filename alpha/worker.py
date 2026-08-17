@@ -10,6 +10,8 @@ from .config import Settings
 from .db import Database
 from .pipeline import Pipeline
 
+logger = logging.getLogger(__name__)
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the durable ALPHA worker")
@@ -35,9 +37,17 @@ def main() -> None:
         if result is not None:
             completed += 1
         if args.once or (args.max_stages > 0 and completed >= args.max_stages):
+            logger.info(
+                "ALPHA worker completed %s checkpointed stage invocation(s); stage limit reached.",
+                completed,
+            )
             return
         if result is None:
             if args.max_stages > 0:
+                logger.info(
+                    "ALPHA worker completed %s checkpointed stage invocation(s); no runnable work remains.",
+                    completed,
+                )
                 return
             time.sleep(settings.worker_poll_seconds)
 

@@ -118,6 +118,7 @@ The test does not need to run for 72 wall-clock hours. It must prove the archite
 - `tests/test_enrichment.py`: prohibited, commercially disallowed, unlicensed and missing enrichment objects block deterministic QA.
 - `tests/test_domain.py`: parsing and applying removal, volume, timing and native-event changes remains deterministic.
 - Linux CI, the scheduled worker and the production image install distribution FFmpeg with font/text/overlay support; CI must execute the real render tests instead of relying on the reduced bundled fallback.
+- The production worker workflow must fail before dependency installation when required Postgres, object-storage, YouTube or Resend secrets are absent, reject a non-Postgres `DATABASE_URL`, and permit one bounded invocation to attempt all 12 checkpointed stages.
 
 Manual review smoke should confirm the campaign controls, authorised-asset intake and timestamped enrichment timeline are legible on desktop/mobile before a production campaign.
 

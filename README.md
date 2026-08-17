@@ -100,7 +100,7 @@ Review-ready messages include the campaign name, sources analysed, research summ
 
 ## Remote deployment
 
-[`render.yaml`](./render.yaml) defines a diskless Render Free web service. It may sleep after inactivity: all state is external, and [`.github/workflows/alpha-worker.yml`](./.github/workflows/alpha-worker.yml) wakes a fresh worker hourly to run up to three durable stages. `workflow_dispatch` provides an immediate first invocation. No Render persistent disk or continuously awake process is required.
+[`render.yaml`](./render.yaml) defines a diskless Render Free web service. It may sleep after inactivity: all state is external, and [`.github/workflows/alpha-worker.yml`](./.github/workflows/alpha-worker.yml) wakes a fresh worker hourly to run the complete 12-stage campaign within a bounded 120-minute invocation. `workflow_dispatch` provides an immediate first invocation. If an invocation is interrupted, its persisted checkpoint lets the next hourly or manual invocation resume it. No Render persistent disk or continuously awake process is required.
 
 ### 1. Create the free persistence services
 
@@ -132,7 +132,7 @@ Review-ready messages include the campaign name, sources analysed, research summ
 
 ### 3. Configure unattended worker invocations
 
-In the GitHub repository, add Actions secrets with the same names/values for `DATABASE_URL`, all five `S3_*` values, `YOUTUBE_API_KEY`, `RESEND_API_KEY`, and `RESEND_FROM_EMAIL`. Add `ALPHA_BASE_URL` with the full Render URL. Add the optional platform credentials if available. Enable Actions, open **ALPHA scheduled worker**, and run it once with **Run workflow**; the schedule then continues without the browser or laptop.
+In the GitHub repository, add Actions secrets with the same names/values for `DATABASE_URL`, all five `S3_*` values, `YOUTUBE_API_KEY`, `RESEND_API_KEY`, and `RESEND_FROM_EMAIL`. Add `ALPHA_BASE_URL` with the full Render URL. Add the optional platform credentials if available. Enable Actions, open **ALPHA scheduled worker**, and run it once with **Run workflow**; that invocation attempts every remaining stage, and the hourly schedule remains as automatic recovery without the browser or laptop. The workflow validates the required secrets before installing dependencies and fails explicitly instead of silently falling back to an empty local SQLite database.
 
 The workflow's hourly cadence is intentionally below GitHub Free's 2,000 private-repository minutes: one-minute billing would consume approximately 720 minutes in a 30-day month, leaving roughly 1,280 minutes for setup and active renders. Standard runners are free for public repositories. If actual private-repository rendering exceeds the remaining allowance, reduce the cadence, make the repository public if appropriate, or accept GitHub's metered Linux-runner overage; no application migration is required.
 

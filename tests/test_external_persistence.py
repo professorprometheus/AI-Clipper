@@ -140,7 +140,10 @@ def test_production_blueprint_is_diskless_and_worker_is_bounded():
         assert f"key: {key}" in blueprint
     assert "ALPHA_RUN_EMBEDDED_WORKER" in blueprint
     assert 'cron: "17 * * * *"' in workflow
-    assert "python -m alpha.worker --max-stages 3" in workflow
+    assert "timeout-minutes: 120" in workflow
+    assert "Validate production configuration" in workflow
+    assert "DATABASE_URL must be an external PostgreSQL URL" in workflow
+    assert "python -m alpha.worker --max-stages 12" in workflow
     assert "apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core" in workflow
     assert "apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core" in ci_workflow
     assert "apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core" in dockerfile
