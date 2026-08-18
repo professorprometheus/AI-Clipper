@@ -30,6 +30,7 @@ Acceptance:
 Build:
 - create/edit/view campaign;
 - campaign economics;
+- payout amount, currency, arbitrary qualified-view unit and optional thresholds/caps/rounding;
 - requirement builder;
 - multiple approved source entries;
 - YouTube video + playlist source types;
@@ -72,6 +73,9 @@ Build:
 - YouTube metadata/resolution adapter where permitted;
 - playlist expansion;
 - transcript pipeline;
+- per-source pasted transcript and exact-ID rights-attested video/audio paths;
+- configurable local/free Whisper-compatible transcription command;
+- source-readiness preflight before research;
 - timestamped chunks;
 - semantic index.
 
@@ -81,6 +85,8 @@ Acceptance:
 - transcript segments link to exact source/timestamps;
 - semantic search returns source + timestamp;
 - duplicate source resolution is idempotent.
+- incomplete live sources stop at `ACTION REQUIRED` with exact missing transcript/media details;
+- uploaded audio/video is transcribed into timestamped segments and used as authorised render media.
 
 ## Phase 4 — Successful-example intelligence
 
@@ -323,8 +329,9 @@ Acceptance:
 ## Enrichment extension — campaign-aware licensed editing
 
 Build:
-- raw brief plus fail-closed campaign enrichment controls;
-- reusable rights/provenance-bearing Asset records in object storage;
+- raw brief plus six fail-closed campaign enrichment permission controls;
+- automatic cache-first provider discovery of commercially reusable assets;
+- reusable provider/source/licence/attribution-bearing Asset records in object storage;
 - observed/inferred/unavailable enrichment research features and candidate suitability;
 - a durable `plan_enrichment` stage before rendering;
 - FFmpeg music looping/fades/ducking/mixing, SFX, licensed visual inserts and native emphasis events;
@@ -336,6 +343,9 @@ Acceptance:
 - every external event has a permitted type, verified object, licence and rights attestation;
 - the exact request "remove the meme, make the music quieter and add a zoom at the punchline" creates a QA-passed child without mutating its parent;
 - no paid media library is mandatory.
+- normal campaign intake contains no manual enrichment asset catalogue;
+- an unavailable or unsuitable external asset is omitted rather than failing the campaign;
+- discovery cache prevents repeated provider downloads and review exposes provider/licence lineage.
 
 ## Out of scope for V0
 

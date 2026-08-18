@@ -26,8 +26,7 @@ def test_campaign_submit_shows_accessible_progress_and_prevents_duplicates(clien
     for message in (
         "Validating campaign details",
         "Creating the campaign",
-        "Uploading source video",
-        "Uploading enrichment asset",
+        "Uploading source media",
         "Starting durable background processing",
         "Background processing has started",
     ):

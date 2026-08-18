@@ -74,8 +74,11 @@ jobs:
           TIKTOK_CLIENT_SECRET: ${{ secrets.TIKTOK_CLIENT_SECRET }}
           INSTAGRAM_ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS_TOKEN }}
           INSTAGRAM_USER_ID: ${{ secrets.INSTAGRAM_USER_ID }}
+          OPENVERSE_API_TOKEN: ${{ secrets.OPENVERSE_API_TOKEN }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          ALPHA_TRANSCRIPTION_COMMAND: ${{ secrets.ALPHA_TRANSCRIPTION_COMMAND }}
           ALPHA_EMAIL_PROVIDER: resend
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           RESEND_FROM_EMAIL: ${{ secrets.RESEND_FROM_EMAIL }}
           ALPHA_BASE_URL: ${{ secrets.ALPHA_BASE_URL }}
-        run: python -m alpha.worker --max-stages 12
+        run: python -m alpha.worker --max-stages 13

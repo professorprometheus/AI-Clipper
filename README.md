@@ -2,6 +2,9 @@
 
 ALPHA is a research-led clipping system. A campaign contains many approved source URLs, successful example clips, research seeds, economics, branding, and deterministic/AI-evaluated requirements. A durable database-backed worker researches, resolves and indexes every approved source, ranks timestamped moments with evidence, renders clips, blocks deterministic failures, emails a review link, preserves edits, and creates a publication export only after explicit human approval.
 
+Qualified-view economics use a payout amount, currency and arbitrary per-view block (for example
+£1.50 per 1,500 views), with optional thresholds, caps and rounding. ALPHA never assumes a 1,000-view block.
+
 The default path is local and free: SQLite, local files, generated authorised media, fixture research, a file email sink, and a manual publication export. No browser connection is needed after campaign submission.
 
 ## Quick start (Windows)
@@ -53,7 +56,13 @@ Live mode provides:
 
 No adapter may bypass access controls, CAPTCHA, or platform terms.
 
-For real rendering, upload media you are authorised to process and supply its exact timestamped transcript. Enter one YouTube video ID per selected file to link the media to an individual approved video or an item inside an approved playlist. Live mode refuses to substitute generated fixture footage when authorised source media is absent.
+For each real YouTube source, ALPHA accepts accessible authorised captions, a transcript pasted
+during intake/remediation, or an authorised video/audio upload linked to its exact video ID. A
+timestamped paste is used directly; plain text is split with estimated timing and clearly labelled.
+When an upload has no supplied transcript, `ALPHA_TRANSCRIPTION_COMMAND` runs a local/free
+Whisper-compatible command that emits timestamped JSON. Live mode refuses to substitute generated
+fixture footage when authorised source media is absent. Source preflight reports metadata,
+transcript, media, research and render readiness before long research begins.
 
 ## Configuration
 
@@ -75,6 +84,11 @@ Copy `.env.example` values into the process environment. Important settings:
 - `YOUTUBE_OAUTH_ACCESS_TOKEN`: optional short-lived caption token for temporary testing only.
 - `TIKTOK_CLIENT_KEY` / `TIKTOK_CLIENT_SECRET`: optional approved TikTok Research Tools client; ALPHA renews the two-hour client token automatically. `TIKTOK_RESEARCH_ACCESS_TOKEN` is only a short-lived testing override.
 - `INSTAGRAM_ACCESS_TOKEN` / `INSTAGRAM_USER_ID`: optional Instagram professional-account Graph access.
+- `OPENVERSE_API_TOKEN`: optional Openverse token; anonymous filtered image search remains available.
+- `PEXELS_API_KEY`: optional Pexels photo/video API key.
+- `ALPHA_ASSET_DISCOVERY_TIMEOUT_SECONDS` / `ALPHA_ASSET_DISCOVERY_MAX_BYTES`: bounded provider download controls.
+- `ALPHA_TRANSCRIPTION_COMMAND`: optional Whisper-compatible command containing `{input}` and `{output_dir}`; it must write JSON segments into the output directory.
+- `ALPHA_TRANSCRIPTION_TIMEOUT_SECONDS`: upper bound for that local transcription process.
 - `ALPHA_RESEARCH_REGION`, `ALPHA_RESEARCH_LOOKBACK_DAYS`, `ALPHA_RESEARCH_RESULTS_PER_QUERY`: live research bounds.
 - `ALPHA_API_TOKEN`: optional API token required through `X-Alpha-Token` when configured.
 - `ALPHA_LEASE_SECONDS`: worker lease duration; expired leases are recoverable.
@@ -100,7 +114,7 @@ Review-ready messages include the campaign name, sources analysed, research summ
 
 ## Remote deployment
 
-[`render.yaml`](./render.yaml) defines a diskless Render Free web service. It may sleep after inactivity: all state is external, and [`.github/workflows/alpha-worker.yml`](./.github/workflows/alpha-worker.yml) wakes a fresh worker hourly to run the complete 12-stage campaign within a bounded 120-minute invocation. `workflow_dispatch` provides an immediate first invocation. If an invocation is interrupted, its persisted checkpoint lets the next hourly or manual invocation resume it. No Render persistent disk or continuously awake process is required.
+[`render.yaml`](./render.yaml) defines a diskless Render Free web service. It may sleep after inactivity: all state is external, and [`.github/workflows/alpha-worker.yml`](./.github/workflows/alpha-worker.yml) wakes a fresh worker hourly to run the complete 13-stage campaign within a bounded 120-minute invocation. `workflow_dispatch` provides an immediate first invocation. If an invocation is interrupted, its persisted checkpoint lets the next hourly or manual invocation resume it. No Render persistent disk or continuously awake process is required.
 
 ### 1. Create the free persistence services
 
@@ -127,12 +141,12 @@ Review-ready messages include the campaign name, sources analysed, research summ
    - `YOUTUBE_API_KEY`
    - `RESEND_API_KEY`
    - `RESEND_FROM_EMAIL`
-3. Optional credential fields remain `YOUTUBE_OAUTH_CLIENT_ID`, `YOUTUBE_OAUTH_CLIENT_SECRET`, `YOUTUBE_OAUTH_REFRESH_TOKEN`, `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET`, `INSTAGRAM_ACCESS_TOKEN`, and `INSTAGRAM_USER_ID`.
+3. Optional credential/configuration fields remain `YOUTUBE_OAUTH_CLIENT_ID`, `YOUTUBE_OAUTH_CLIENT_SECRET`, `YOUTUBE_OAUTH_REFRESH_TOKEN`, `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET`, `INSTAGRAM_ACCESS_TOKEN`, `INSTAGRAM_USER_ID`, `OPENVERSE_API_TOKEN`, `PEXELS_API_KEY`, and `ALPHA_TRANSCRIPTION_COMMAND`.
 4. Open `/api/health`. `ALPHA_BASE_URL` falls back to Render's `RENDER_EXTERNAL_URL`, so review emails target the deployed dashboard.
 
 ### 3. Configure unattended worker invocations
 
-In the GitHub repository, add Actions secrets with the same names/values for `DATABASE_URL`, all five `S3_*` values, `YOUTUBE_API_KEY`, `RESEND_API_KEY`, and `RESEND_FROM_EMAIL`. Add `ALPHA_BASE_URL` with the full Render URL. Add the optional platform credentials if available. Enable Actions, open **ALPHA scheduled worker**, and run it once with **Run workflow**; that invocation attempts every remaining stage, and the hourly schedule remains as automatic recovery without the browser or laptop. The workflow validates the required secrets before installing dependencies and fails explicitly instead of silently falling back to an empty local SQLite database.
+In the GitHub repository, add Actions secrets with the same names/values for `DATABASE_URL`, all five `S3_*` values, `YOUTUBE_API_KEY`, `RESEND_API_KEY`, and `RESEND_FROM_EMAIL`. Add `ALPHA_BASE_URL` with the full Render URL. Add optional platform, asset-provider and transcription-command secrets if available. Enable Actions, open **ALPHA scheduled worker**, and run it once with **Run workflow**; that invocation attempts every remaining stage, and the hourly schedule remains as automatic recovery without the browser or laptop. The workflow validates the required secrets before installing dependencies and fails explicitly instead of silently falling back to an empty local SQLite database.
 
 The workflow's hourly cadence is intentionally below GitHub Free's 2,000 private-repository minutes: one-minute billing would consume approximately 720 minutes in a 30-day month, leaving roughly 1,280 minutes for setup and active renders. Standard runners are free for public repositories. If actual private-repository rendering exceeds the remaining allowance, reduce the cadence, make the repository public if appropriate, or accept GitHub's metered Linux-runner overage; no application migration is required.
 
@@ -148,11 +162,29 @@ There is no unavoidable monthly component at this scale. Exceeding a provider al
 
 ## Optional creative enrichment
 
-Campaign intake now preserves the raw brief and exposes fail-closed permissions for music, memes/reactions, B-roll, SFX and external images/video, including insert limits, volume range, ducking, required sources and prohibited types. Before submitting, users can upload authorised campaign music, reaction art and B-roll with licence and commercial-use attestations; production files are private S3 objects, while local development uses the filesystem adapter.
+Campaign intake preserves the raw brief but asks only whether music, memes/reactions, B-roll, SFX,
+external images and external video are permitted, plus unusual instructions. Users do not upload or
+tag an asset catalogue for each campaign. The planner decides whether each permitted technique
+helps based on example/style research, niche, pacing, humour, emotion, the source moment and
+campaign rules, and records why every type was used or omitted.
 
-The worker persists an evidence-backed Enrichment Plan before FFmpeg rendering. Supported composition includes music loops/fades/speech ducking, timed SFX, image/video full-screen/PiP/overlays, and native punch-in, dynamic crop/speaker focus, freeze, emphasis text, keyword/progress/pull-quote treatment, blur, fast-cut and reaction-hold events. The review dashboard explains the timestamp, asset and reason for each event. Requests such as `remove music`, `less memes`, `more B-roll`, `change music`, `move meme to 4 seconds`, `regenerate enrichment`, and the combined acceptance edit create immutable child versions.
+The worker searches already cached licensed assets first. In live mode it can then query Openverse
+and, when `PEXELS_API_KEY` is present, Pexels; each accepted result retains provider identity, source
+and licence URL, attribution, semantic tags and the private cached object URI. Results that do not
+declare commercial use and modification permission are rejected. If no rights-safe match exists,
+that enrichment is omitted and rendering continues—ALPHA never scrapes image search or copied meme,
+music or video libraries.
 
-ALPHA ships no copied meme/music catalogue and requires no paid asset provider. Supply user-owned, public-domain or properly licensed assets; recorded metadata does not transfer or guarantee rights.
+The worker persists an evidence-backed Enrichment Plan before FFmpeg rendering. Supported
+composition includes music loops/fades/speech ducking, timed SFX, image/video full-screen/PiP/
+overlays, and native punch-in, dynamic crop/speaker focus, freeze, emphasis text, keyword/progress/
+pull-quote treatment, blur, fast-cut and reaction-hold events. The review timeline shows timestamps,
+reason, provider and licence/provenance. Requests such as `remove the meme`, `use less B-roll`,
+`change the music`, `make the music quieter`, `no sound effects`, and `add a reaction at the
+punchline` create immutable child versions.
+
+ALPHA ships no copied third-party catalogue and requires no paid asset provider. Provider licence
+metadata is preserved for audit and review but should still be checked for the intended campaign.
 
 ## Durable processing model
 

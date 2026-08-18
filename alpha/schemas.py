@@ -5,10 +5,24 @@ from typing import Any, Literal
 from pydantic import BaseModel, EmailStr, Field, HttpUrl, field_validator, model_validator
 
 
+class ImportedTranscriptSegment(BaseModel):
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(gt=0)
+    text: str = Field(min_length=1, max_length=10_000)
+
+    @model_validator(mode="after")
+    def valid_window(self) -> ImportedTranscriptSegment:
+        if self.end_ms <= self.start_ms:
+            raise ValueError("transcript end_ms must be greater than start_ms")
+        return self
+
+
 class SourceInput(BaseModel):
     type: Literal["youtube_video", "youtube_playlist", "uploaded", "other"]
     url: HttpUrl
     title: str | None = None
+    transcript: str | None = Field(default=None, max_length=500_000)
+    transcript_segments: list[ImportedTranscriptSegment] = Field(default_factory=list)
 
 
 class ExampleInput(BaseModel):
@@ -59,7 +73,7 @@ class EnrichmentControls(BaseModel):
     external_video_allowed: bool = False
     required_asset_source: str | None = Field(default=None, max_length=500)
     prohibited_asset_types: list[AssetType] = Field(default_factory=list)
-    max_inserts: int = Field(default=0, ge=0, le=20)
+    max_inserts: int = Field(default=3, ge=0, le=20)
     max_insert_duration_seconds: float = Field(default=2.0, gt=0, le=30)
     music_volume_min_db: float = Field(default=-30.0, ge=-60, le=0)
     music_volume_max_db: float = Field(default=-12.0, ge=-60, le=0)
@@ -78,8 +92,11 @@ class CampaignCreate(BaseModel):
     owner_email: EmailStr
     platform: str = "Content Rewards"
     campaign_url: HttpUrl | None = None
-    payout_model: str | None = "per_qualified_view"
-    payout_value: float | None = Field(default=0, ge=0)
+    payout_model: str | None = "qualified_view_block"
+    payout_amount: float | None = Field(default=0, ge=0)
+    views_per_payout_unit: int | None = Field(default=1000, gt=0)
+    payout_rules: dict[str, Any] = Field(default_factory=dict)
+    payout_value: float | None = Field(default=None, ge=0)
     currency: str = Field(default="GBP", min_length=3, max_length=3)
     deadline: str | None = None
     research_seeds: list[str] = Field(default_factory=list, max_length=100)
@@ -105,6 +122,31 @@ class CampaignCreate(BaseModel):
             raise ValueError("duplicate approved source URL")
         if len(set(example_urls)) != len(example_urls):
             raise ValueError("duplicate successful example URL")
+        return self
+
+    @model_validator(mode="after")
+    def normalize_legacy_payout(self) -> CampaignCreate:
+        legacy_only = (
+            "payout_value" in self.model_fields_set and "payout_amount" not in self.model_fields_set
+        )
+        if legacy_only and self.payout_value is not None:
+            self.payout_amount = self.payout_value
+            if "payout_model" not in self.model_fields_set:
+                self.payout_model = "per_qualified_view"
+                self.views_per_payout_unit = 1
+        if self.payout_model == "per_qualified_view" and self.views_per_payout_unit == 1000:
+            self.views_per_payout_unit = 1
+        return self
+
+
+class PastedSourceTranscriptInput(BaseModel):
+    transcript: str | None = Field(default=None, max_length=500_000)
+    segments: list[ImportedTranscriptSegment] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def has_content(self) -> PastedSourceTranscriptInput:
+        if not (self.transcript or "").strip() and not self.segments:
+            raise ValueError("paste transcript text or timestamped segments")
         return self
 
 
@@ -183,18 +225,6 @@ class ExperimentInput(BaseModel):
     hypothesis: str = Field(min_length=1)
     treatment_weights: dict[str, float]
     allocation: float = Field(default=0.15, gt=0, lt=1)
-
-
-class ImportedTranscriptSegment(BaseModel):
-    start_ms: int = Field(ge=0)
-    end_ms: int = Field(gt=0)
-    text: str = Field(min_length=1, max_length=10_000)
-
-    @model_validator(mode="after")
-    def valid_window(self) -> ImportedTranscriptSegment:
-        if self.end_ms <= self.start_ms:
-            raise ValueError("transcript end_ms must be greater than start_ms")
-        return self
 
 
 class LoginInput(BaseModel):

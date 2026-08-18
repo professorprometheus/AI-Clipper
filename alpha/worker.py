@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 def _is_terminal_failure(result: dict | None) -> bool:
-    return bool(result and result.get("status") == "failed")
+    return bool(result and result.get("status") in {"failed", "action_required"})
 
 
 def main() -> None:

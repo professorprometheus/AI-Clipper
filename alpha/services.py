@@ -24,6 +24,26 @@ from .schemas import (
 )
 
 
+def calculate_campaign_revenue(campaign: dict[str, Any], qualified_views: int) -> float:
+    if campaign.get("payout_model") != "qualified_view_block":
+        return 0.0
+    unit = int(campaign.get("views_per_payout_unit") or 0)
+    if unit <= 0:
+        return 0.0
+    amount = float(campaign.get("payout_amount") or 0)
+    rules = load(campaign.get("payout_rules_json"), {})
+    revenue = qualified_views / unit * amount
+    if rules.get("rounding") == "whole_blocks":
+        revenue = (qualified_views // unit) * amount
+    if rules.get("cap") is not None:
+        revenue = min(revenue, float(rules["cap"]))
+    if rules.get("minimum_qualified_views") and qualified_views < int(
+        rules["minimum_qualified_views"]
+    ):
+        revenue = 0
+    return round(revenue, 2)
+
+
 class AlphaService:
     def __init__(self, db: Database, pipeline: Pipeline):
         self.db = db
@@ -60,9 +80,10 @@ class AlphaService:
                     }[suffix],
                 )
         self.db.execute(
-            "INSERT INTO campaigns(id,name,owner_email,platform,campaign_url,payout_model,payout_value,currency,"
+            "INSERT INTO campaigns(id,name,owner_email,platform,campaign_url,payout_model,payout_value,"
+            "payout_amount,views_per_payout_unit,payout_rules_json,currency,"
             "deadline,status,research_seeds_json,target_platforms_json,watermark_json,raw_brief,"
-            "enrichment_config_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "enrichment_config_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 campaign_id,
                 payload.name,
@@ -70,7 +91,14 @@ class AlphaService:
                 payload.platform,
                 str(payload.campaign_url) if payload.campaign_url else None,
                 payload.payout_model,
-                payload.payout_value,
+                (
+                    (payload.payout_amount or 0) / (payload.views_per_payout_unit or 1)
+                    if payload.payout_model == "qualified_view_block"
+                    else payload.payout_value
+                ),
+                payload.payout_amount,
+                payload.views_per_payout_unit,
+                dump(payload.payout_rules),
                 payload.currency,
                 payload.deadline,
                 "draft",
@@ -84,11 +112,23 @@ class AlphaService:
             ),
         )
         for source in payload.sources:
+            source_id = uid()
+            pasted_segments = [segment.model_dump() for segment in source.transcript_segments]
+            pasted_payload = (
+                pasted_segments
+                if pasted_segments
+                else (
+                    {"text": source.transcript.strip()}
+                    if source.transcript and source.transcript.strip()
+                    else None
+                )
+            )
             self.db.execute(
-                "INSERT INTO approved_sources(id,campaign_id,source_type,url,canonical_url,title,status,metadata_json,created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO approved_sources(id,campaign_id,source_type,url,canonical_url,title,status,"
+                "metadata_json,pasted_transcript_json,transcript_timestamped,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (
-                    uid(),
+                    source_id,
                     campaign_id,
                     source.type,
                     str(source.url),
@@ -96,6 +136,8 @@ class AlphaService:
                     source.title,
                     "pending",
                     "{}",
+                    dump(pasted_payload) if pasted_payload is not None else None,
+                    int(bool(pasted_segments)),
                     timestamp,
                 ),
             )
@@ -166,7 +208,7 @@ class AlphaService:
         filename: str,
         content_type: str,
         content: bytes,
-        transcript_json: str,
+        transcript_json: str | None,
         rights_attestation: str,
         title: str | None = None,
         approved_source_id: str | None = None,
@@ -175,8 +217,10 @@ class AlphaService:
         campaign = self.db.one("SELECT * FROM campaigns WHERE id=?", (campaign_id,))
         if not campaign:
             raise KeyError("campaign not found")
-        if campaign["status"] != "draft":
-            raise PermissionError("sources can only be imported before campaign submission")
+        if campaign["status"] not in {"draft", "action_required", "failed_needs_attention"}:
+            raise PermissionError(
+                "source material can only be added to a draft or action-required campaign"
+            )
         if len(rights_attestation.strip()) < 12:
             raise ValueError("a clear source-rights attestation is required")
         if not content or len(content) > 500_000_000:
@@ -187,11 +231,16 @@ class AlphaService:
             ".mov": "video/quicktime",
             ".mkv": "video/x-matroska",
             ".webm": "video/webm",
+            ".mp3": "audio/mpeg",
+            ".wav": "audio/wav",
+            ".m4a": "audio/mp4",
+            ".aac": "audio/aac",
+            ".flac": "audio/flac",
         }
         if suffix not in allowed:
             raise ValueError("unsupported source media format")
         try:
-            raw_segments = json.loads(transcript_json)
+            raw_segments = json.loads(transcript_json or "[]")
             segments = [
                 ImportedTranscriptSegment.model_validate(segment).model_dump()
                 for segment in raw_segments
@@ -200,8 +249,6 @@ class AlphaService:
             raise ValueError(
                 "transcript_json must be a valid list of timestamped segments"
             ) from exc
-        if not segments:
-            raise ValueError("at least one timestamped transcript segment is required")
         segments.sort(key=lambda segment: segment["start_ms"])
         if any(
             current["start_ms"] < previous["end_ms"]
@@ -268,11 +315,11 @@ class AlphaService:
             storage_key, content, content_type or allowed[suffix]
         )
         with self.pipeline.providers.storage.materialize(media_uri) as local_media:
-            probe = self.pipeline.providers.renderer.probe_media(local_media)
+            probe = self.pipeline.providers.renderer.probe_asset(local_media)
         if not probe["valid"]:
             self.pipeline.providers.storage.delete(media_uri)
-            raise ValueError("uploaded source is not a readable video")
-        if segments[-1]["end_ms"] > probe["duration_ms"] + 500:
+            raise ValueError("uploaded source is not readable video or audio")
+        if segments and segments[-1]["end_ms"] > probe["duration_ms"] + 500:
             self.pipeline.providers.storage.delete(media_uri)
             raise ValueError("transcript timestamps exceed the uploaded media duration")
 
@@ -349,6 +396,53 @@ class AlphaService:
                 "linked_external_id": external_id,
             },
         )
+        if campaign["status"] in {"action_required", "failed_needs_attention"}:
+            self.db.execute(
+                "UPDATE pipeline_jobs SET current_stage='resolve_sources' WHERE campaign_id=? "
+                "AND status IN ('action_required','failed')",
+                (campaign_id,),
+            )
+        return self.db.one("SELECT * FROM approved_sources WHERE id=?", (approved_source_id,)) or {}
+
+    def import_pasted_transcript(
+        self,
+        campaign_id: str,
+        approved_source_id: str,
+        transcript: str | None,
+        segments: list[ImportedTranscriptSegment],
+    ) -> dict[str, Any]:
+        campaign = self.db.one("SELECT * FROM campaigns WHERE id=?", (campaign_id,))
+        if not campaign:
+            raise KeyError("campaign not found")
+        if campaign["status"] not in {"draft", "action_required", "failed_needs_attention"}:
+            raise PermissionError(
+                "transcripts can only be added to a draft or action-required campaign"
+            )
+        source = self.db.one(
+            "SELECT * FROM approved_sources WHERE id=? AND campaign_id=?",
+            (approved_source_id, campaign_id),
+        )
+        if not source:
+            raise ValueError("approved source does not belong to this campaign")
+        rows = [segment.model_dump() for segment in segments]
+        payload: Any = rows if rows else {"text": (transcript or "").strip()}
+        self.db.execute(
+            "UPDATE approved_sources SET pasted_transcript_json=?,transcript_timestamped=?,status='pending' "
+            "WHERE id=?",
+            (dump(payload), int(bool(rows)), approved_source_id),
+        )
+        self.db.audit(
+            "approved_source",
+            approved_source_id,
+            "pasted_transcript_added",
+            {"campaign_id": campaign_id, "timestamped": bool(rows), "segment_count": len(rows)},
+        )
+        if campaign["status"] in {"action_required", "failed_needs_attention"}:
+            self.db.execute(
+                "UPDATE pipeline_jobs SET current_stage='ingest_sources' WHERE campaign_id=? "
+                "AND status IN ('action_required','failed')",
+                (campaign_id,),
+            )
         return self.db.one("SELECT * FROM approved_sources WHERE id=?", (approved_source_id,)) or {}
 
     def get_campaign(self, campaign_id: str) -> dict[str, Any]:
@@ -362,6 +456,44 @@ class AlphaService:
         campaign["sources"] = self.db.all(
             "SELECT * FROM approved_sources WHERE campaign_id=? ORDER BY created_at", (campaign_id,)
         )
+        research_ready = bool(
+            self.db.one(
+                "SELECT id FROM research_observations WHERE campaign_id=? LIMIT 1", (campaign_id,)
+            )
+        )
+        for source in campaign["sources"]:
+            items = self.db.all(
+                "SELECT * FROM source_items WHERE approved_source_id=?", (source["id"],)
+            )
+            transcript_count = self.db.one(
+                "SELECT COUNT(*) AS n FROM transcript_segments t JOIN source_items s "
+                "ON s.id=t.source_item_id WHERE s.approved_source_id=?",
+                (source["id"],),
+            )["n"]
+            linked_media = self.db.one(
+                "SELECT id FROM linked_source_media WHERE approved_source_id=? LIMIT 1",
+                (source["id"],),
+            ) or self.db.one(
+                "SELECT id FROM source_imports WHERE approved_source_id=? LIMIT 1",
+                (source["id"],),
+            )
+            item_has_media = any(
+                bool(load(item.get("metadata_json"), {}).get("asset_uri")) for item in items
+            )
+            pasted = bool(source.get("pasted_transcript_json"))
+            transcript_ready = bool(transcript_count or pasted)
+            media_ready = bool(linked_media or item_has_media)
+            fixture_ready = self.pipeline.settings.provider_mode == "fixture"
+            source["readiness"] = {
+                "metadata_ready": bool(items) or source["status"] == "resolved",
+                "transcript_ready": transcript_ready,
+                "transcript_timestamped": bool(source.get("transcript_timestamped"))
+                or bool(transcript_count),
+                "media_ready": media_ready or fixture_ready,
+                "research_ready": research_ready,
+                "render_ready": transcript_ready and (media_ready or fixture_ready),
+                "action_required": not transcript_ready or not (media_ready or fixture_ready),
+            }
         campaign["successful_examples"] = self.db.all(
             "SELECT * FROM successful_examples WHERE campaign_id=? ORDER BY created_at",
             (campaign_id,),
@@ -852,7 +984,16 @@ class AlphaService:
         campaign = self.db.one("SELECT * FROM campaigns WHERE id=?", (campaign_id,))
         if not campaign:
             raise KeyError("campaign not found")
-        allowed = {"name", "owner_email", "deadline", "payout_model", "payout_value", "currency"}
+        allowed = {
+            "name",
+            "owner_email",
+            "deadline",
+            "payout_model",
+            "payout_amount",
+            "views_per_payout_unit",
+            "payout_rules_json",
+            "currency",
+        }
         applied = {key: value for key, value in changes.items() if key in allowed}
         if applied:
             assignments = ",".join(f"{key}=?" for key in applied)
@@ -1128,13 +1269,39 @@ class AlphaService:
         return self.db.one("SELECT * FROM feedback WHERE id=?", (feedback_id,)) or {}
 
     def record_performance(self, publication_id: str, payload: PerformanceInput) -> dict[str, Any]:
-        if not self.db.one("SELECT id FROM publications WHERE id=?", (publication_id,)):
+        campaign = self.db.one(
+            "SELECT c.* FROM publications p JOIN clip_variants v ON v.id=p.clip_variant_id "
+            "JOIN candidate_moments m ON m.id=v.candidate_id JOIN campaigns c ON c.id=m.campaign_id "
+            "WHERE p.id=?",
+            (publication_id,),
+        )
+        if not campaign:
             raise KeyError("publication not found")
         snapshot_id = uid()
         metrics = payload.model_dump(
             include={"views", "likes", "comments", "shares", "qualified_views", "accepted"}
         )
         revenue = payload.model_dump(include={"revenue", "payout", "currency"})
+        if (
+            not revenue["revenue"]
+            and campaign.get("payout_model") == "qualified_view_block"
+            and campaign.get("views_per_payout_unit")
+        ):
+            rules = load(campaign.get("payout_rules_json"), {})
+            calculated = calculate_campaign_revenue(campaign, payload.qualified_views)
+            revenue.update(
+                {
+                    "revenue": round(calculated, 2),
+                    "payout": round(calculated, 2),
+                    "currency": campaign["currency"],
+                    "calculation": {
+                        "model": "qualified_view_block",
+                        "payout_amount": campaign.get("payout_amount"),
+                        "views_per_payout_unit": campaign.get("views_per_payout_unit"),
+                        "rules": rules,
+                    },
+                }
+            )
         baseline = {"views": payload.account_baseline_views}
         self.db.execute(
             "INSERT INTO performance_snapshots(id,publication_id,captured_at,metrics_json,revenue_json,account_baseline_json) VALUES (?,?,?,?,?,?)",

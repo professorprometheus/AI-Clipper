@@ -24,6 +24,7 @@ from .schemas import (
     ExperimentInput,
     FeedbackInput,
     LoginInput,
+    PastedSourceTranscriptInput,
     PerformanceInput,
     PublishInput,
     RequirementUpdate,
@@ -246,7 +247,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def import_authorised_source(
         campaign_id: str,
         media: UploadFile = File(...),
-        transcript_json: str = Form(...),
+        transcript_json: str | None = Form(default=None),
         rights_attestation: str = Form(...),
         title: str | None = Form(default=None),
         approved_source_id: str | None = Form(default=None),
@@ -265,7 +266,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 approved_source_id,
                 external_id,
             )
-        except ValueError as exc:
+        except (ValueError, PermissionError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @api.post("/api/campaigns/{campaign_id}/sources/{source_id}/transcript", status_code=201)
+    def import_pasted_source_transcript(
+        campaign_id: str, source_id: str, payload: PastedSourceTranscriptInput
+    ):
+        try:
+            return service.import_pasted_transcript(
+                campaign_id, source_id, payload.transcript, payload.segments
+            )
+        except (ValueError, PermissionError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @api.post("/api/campaigns/{campaign_id}/assets", status_code=201)

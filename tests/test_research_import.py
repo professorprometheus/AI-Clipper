@@ -6,13 +6,26 @@ from fastapi.testclient import TestClient
 
 from alpha.main import create_app
 
-from .conftest import campaign_payload
+from .conftest import campaign_payload, generated_source_video
 
 
-def test_manual_research_import_queries_clusters_and_clipper_profiles(settings):
+def test_manual_research_import_queries_clusters_and_clipper_profiles(settings, tmp_path):
     app = create_app(replace(settings, provider_mode="manual"))
     with TestClient(app) as client:
         campaign_id = client.post("/api/campaigns", json=campaign_payload()).json()["id"]
+        media = generated_source_video(tmp_path / "manual-research-source.mp4")
+        source_upload = client.post(
+            f"/api/campaigns/{campaign_id}/sources/import",
+            files={"media": ("manual-research-source.mp4", media, "video/mp4")},
+            data={
+                "transcript_json": (
+                    '[{"start_ms":0,"end_ms":3000,"text":"A surprising proof about creator growth."}]'
+                ),
+                "rights_attestation": "I own and authorise this source media for campaign clipping.",
+                "title": "Authorised research source",
+            },
+        )
+        assert source_upload.status_code == 201, source_upload.text
         observations = []
         for index in range(3):
             observations.append(
@@ -51,7 +64,7 @@ def test_manual_research_import_queries_clusters_and_clipper_profiles(settings):
         assert imported.status_code == 201, imported.text
         client.post(f"/api/campaigns/{campaign_id}/submit")
         results = [
-            app.state.pipeline.run_once(f"manual-research-worker-{index}") for index in range(5)
+            app.state.pipeline.run_once(f"manual-research-worker-{index}") for index in range(6)
         ]
         social = results[-1]
         assert social["stage"] == "social_research"

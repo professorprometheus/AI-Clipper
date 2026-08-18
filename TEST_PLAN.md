@@ -30,6 +30,8 @@ Failure paths:
 - duplicated source;
 - playlist partially resolves;
 - transcription failure and retry;
+- preflight action required for missing transcript/media;
+- zero-candidate broad fallback and zero-render action required;
 - mandatory watermark missing;
 - research provider unavailable;
 - publishing provider unavailable;
@@ -109,6 +111,9 @@ The test does not need to run for 72 wall-clock hours. It must prove the archite
 - `tests/test_api_e2e.py`: rights-attested media links to an exact approved YouTube/playlist video ID and supplies the transcript/render asset for that source item.
 - `tests/test_domain.py`: structured edit parsing/application and strict separation of AI-evaluated requirements from deterministic QA.
 - `tests/test_external_persistence.py`: S3-compatible put/get/stream/materialise/delete contract, private bucket/key validation, disposable staging, real FFmpeg output recovered by a fresh adapter, Postgres URL/query-dialect selection and database state recovered after process-style reconstruction.
+- `tests/test_new_campaign_workflows.py`: cache-first automatic asset discovery, provider download reuse, permission-based omission and safe continuation when no asset is available.
+- `tests/test_new_campaign_workflows.py`: pasted/plain YouTube transcripts, exact-linked uploaded media with automatic transcription, explicit source preflight and pre-research `ACTION REQUIRED`.
+- `tests/test_new_campaign_workflows.py`: broad strongest-moment candidate fallback, arbitrary qualified-view payout units/rounding/revenue, and removal of manual asset fields/legacy payout wording from normal intake.
 
 ## Creative enrichment coverage
 
@@ -118,10 +123,11 @@ The test does not need to run for 72 wall-clock hours. It must prove the archite
 - `tests/test_enrichment.py`: prohibited, commercially disallowed, unlicensed and missing enrichment objects block deterministic QA.
 - `tests/test_domain.py`: parsing and applying removal, volume, timing and native-event changes remains deterministic.
 - Linux CI, the scheduled worker and the production image install distribution FFmpeg with font/text/overlay support; CI must execute the real render tests instead of relying on the reduced bundled fallback.
-- The production worker workflow must fail before dependency installation when required Postgres, object-storage, YouTube or Resend secrets are absent, reject a non-Postgres `DATABASE_URL`, and permit one bounded invocation to attempt all 12 checkpointed stages.
+- The production worker workflow must fail before dependency installation when required Postgres, object-storage, YouTube or Resend secrets are absent, reject a non-Postgres `DATABASE_URL`, and permit one bounded invocation to attempt all 13 checkpointed stages.
 - Deterministic campaign/input failures must become terminal after one attempt and make the worker process exit unsuccessfully; transient provider/network failures retain bounded retry backoff.
 
-Manual review smoke should confirm the campaign controls, authorised-asset intake and timestamped enrichment timeline are legible on desktop/mobile before a production campaign.
+Manual review smoke should confirm the six campaign permissions, source-readiness/remediation panel and
+automatic provider/licence enrichment timeline are legible on desktop/mobile before a production campaign.
 
 The campaign-status smoke must also disable the embedded worker, submit a campaign, and verify that the detail page says it is safely queued and will continue automatically without the browser. Verify a draft separately exposes Start processing and Delete draft, submitted campaigns expose neither deletion nor a manual “run remaining stages” action, foreground failures retain a retry surface, and mobile loading cards stay within the viewport.
 

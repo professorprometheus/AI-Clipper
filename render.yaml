@@ -55,3 +55,9 @@ services:
         sync: false
       - key: INSTAGRAM_USER_ID
         sync: false
+      - key: OPENVERSE_API_TOKEN
+        sync: false
+      - key: PEXELS_API_KEY
+        sync: false
+      - key: ALPHA_TRANSCRIPTION_COMMAND
+        sync: false

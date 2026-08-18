@@ -4,7 +4,9 @@ import base64
 import hashlib
 import json
 import math
+import mimetypes
 import re
+import shlex
 import shutil
 import subprocess
 import urllib.error
@@ -16,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from .db import dump, load
 from .domain import parse_edit_instruction
@@ -250,6 +252,277 @@ def build_storage(settings: Any) -> StorageAdapter:
             settings.s3_secret_access_key,
         )
     raise ValueError(f"Unsupported storage provider: {settings.storage_provider}")
+
+
+@dataclass(frozen=True)
+class DiscoveredAsset:
+    provider: str
+    provider_asset_id: str
+    asset_type: str
+    title: str
+    tags: list[str]
+    semantic_description: str
+    content_url: str
+    source_url: str
+    licence: str
+    licence_url: str | None
+    attribution_requirement: str | None
+    permitted_commercial_use: bool
+    permits_modification: bool
+    duration_ms: int | None = None
+
+
+class AssetDiscoveryAdapter(ABC):
+    @abstractmethod
+    def search(
+        self, query: str, asset_types: set[str], limit: int = 8
+    ) -> list[DiscoveredAsset]: ...
+
+    @abstractmethod
+    def download(self, asset: DiscoveredAsset) -> tuple[bytes, str]: ...
+
+
+class NullAssetDiscoveryAdapter(AssetDiscoveryAdapter):
+    def search(self, query: str, asset_types: set[str], limit: int = 8) -> list[DiscoveredAsset]:
+        return []
+
+    def download(self, asset: DiscoveredAsset) -> tuple[bytes, str]:
+        raise RuntimeError("no automatic asset provider is configured")
+
+
+class HTTPAssetDiscoveryAdapter(AssetDiscoveryAdapter):
+    def __init__(self, timeout_seconds: float = 15, max_bytes: int = 50_000_000):
+        self.timeout_seconds = timeout_seconds
+        self.max_bytes = max_bytes
+
+    def _json(self, url: str, headers: dict[str, str] | None = None) -> dict[str, Any]:
+        request = urllib.request.Request(
+            url,
+            headers={"User-Agent": "ALPHA/0.1 rights-safe-asset-discovery", **(headers or {})},
+        )
+        with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def download(self, asset: DiscoveredAsset) -> tuple[bytes, str]:
+        request = urllib.request.Request(
+            asset.content_url, headers={"User-Agent": "ALPHA/0.1 rights-safe-asset-discovery"}
+        )
+        with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+            declared = int(response.headers.get("Content-Length") or 0)
+            if declared > self.max_bytes:
+                raise ValueError("discovered asset exceeds configured download limit")
+            content = response.read(self.max_bytes + 1)
+            if len(content) > self.max_bytes:
+                raise ValueError("discovered asset exceeds configured download limit")
+            content_type = response.headers.get_content_type()
+        return content, content_type or mimetypes.guess_type(asset.content_url)[
+            0
+        ] or "application/octet-stream"
+
+
+class OpenverseAssetDiscoveryAdapter(HTTPAssetDiscoveryAdapter):
+    """Commercial/modification-filtered Openverse image/audio search."""
+
+    allowed_licences = {"cc0", "pdm", "by", "by-sa"}
+
+    def __init__(self, token: str = "", **kwargs: Any):
+        super().__init__(**kwargs)
+        self.token = token
+
+    def search(self, query: str, asset_types: set[str], limit: int = 8) -> list[DiscoveredAsset]:
+        media = "audio" if asset_types <= {"music", "sfx"} else "images"
+        supported = (
+            {"music", "sfx"}
+            if media == "audio"
+            else {
+                "meme_image",
+                "reaction",
+                "image",
+                "graphic",
+            }
+        )
+        requested = sorted(asset_types & supported)
+        if not requested:
+            return []
+        params = urlencode(
+            {
+                "q": query[:300],
+                "license_type": "commercial,modification",
+                "mature": "false",
+                "page_size": min(20, max(1, limit)),
+            }
+        )
+        headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
+        try:
+            payload = self._json(f"https://api.openverse.org/v1/{media}/?{params}", headers)
+        except (OSError, ValueError, urllib.error.URLError):
+            return []
+        results: list[DiscoveredAsset] = []
+        for row in payload.get("results", []):
+            licence = str(row.get("license") or "").lower()
+            content_url = str(row.get("url") or "")
+            source_url = str(row.get("foreign_landing_url") or row.get("detail_url") or "")
+            if licence not in self.allowed_licences or not content_url.startswith("http"):
+                continue
+            tags = [str(tag.get("name")) for tag in row.get("tags") or [] if tag.get("name")]
+            asset_type = requested[0]
+            results.append(
+                DiscoveredAsset(
+                    provider="openverse",
+                    provider_asset_id=str(row.get("id")),
+                    asset_type=asset_type,
+                    title=str(row.get("title") or f"Openverse {asset_type}"),
+                    tags=tags[:20],
+                    semantic_description=" ".join(tags[:12]),
+                    content_url=content_url,
+                    source_url=source_url,
+                    licence=licence.upper(),
+                    licence_url=row.get("license_url"),
+                    attribution_requirement=row.get("attribution")
+                    if licence in {"by", "by-sa"}
+                    else None,
+                    permitted_commercial_use=True,
+                    permits_modification=True,
+                    duration_ms=round(float(row.get("duration") or 0) * 1000) or None,
+                )
+            )
+        return results
+
+
+class PexelsAssetDiscoveryAdapter(HTTPAssetDiscoveryAdapter):
+    def __init__(self, api_key: str, **kwargs: Any):
+        super().__init__(**kwargs)
+        self.api_key = api_key
+
+    def search(self, query: str, asset_types: set[str], limit: int = 8) -> list[DiscoveredAsset]:
+        if not self.api_key:
+            return []
+        headers = {"Authorization": self.api_key}
+        is_video = bool(asset_types & {"broll", "meme_video"})
+        endpoint = (
+            "https://api.pexels.com/videos/search"
+            if is_video
+            else "https://api.pexels.com/v1/search"
+        )
+        params = urlencode({"query": query[:300], "per_page": min(15, max(1, limit))})
+        try:
+            payload = self._json(f"{endpoint}?{params}", headers)
+        except (OSError, ValueError, urllib.error.URLError):
+            return []
+        results: list[DiscoveredAsset] = []
+        rows = payload.get("videos" if is_video else "photos", [])
+        for row in rows:
+            if is_video:
+                files = [
+                    item
+                    for item in row.get("video_files", [])
+                    if item.get("file_type") == "video/mp4" and item.get("link")
+                ]
+                chosen = min(
+                    files, key=lambda item: abs(int(item.get("width") or 720) - 720), default=None
+                )
+                content_url = str((chosen or {}).get("link") or "")
+                title = f"Pexels video by {row.get('user', {}).get('name', 'contributor')}"
+                asset_type = "broll" if "broll" in asset_types else "meme_video"
+                duration_ms = int(row.get("duration") or 0) * 1000 or None
+            else:
+                content_url = str(row.get("src", {}).get("large") or "")
+                title = str(row.get("alt") or "Pexels image")
+                asset_type = next(
+                    iter(asset_types & {"image", "graphic", "meme_image", "reaction"}), "image"
+                )
+                duration_ms = None
+            if not content_url.startswith("http"):
+                continue
+            contributor = row.get("photographer") or row.get("user", {}).get("name")
+            results.append(
+                DiscoveredAsset(
+                    provider="pexels",
+                    provider_asset_id=str(row.get("id")),
+                    asset_type=asset_type,
+                    title=title,
+                    tags=query.split()[:12],
+                    semantic_description=f"{title}. {query}",
+                    content_url=content_url,
+                    source_url=str(row.get("url") or "https://www.pexels.com"),
+                    licence="Pexels License",
+                    licence_url="https://www.pexels.com/license/",
+                    attribution_requirement=(
+                        f"Photo/video by {contributor} on Pexels"
+                        if contributor
+                        else "Provided by Pexels"
+                    ),
+                    permitted_commercial_use=True,
+                    permits_modification=True,
+                    duration_ms=duration_ms,
+                )
+            )
+        return results
+
+
+class CompositeAssetDiscoveryAdapter(AssetDiscoveryAdapter):
+    def __init__(self, providers: list[AssetDiscoveryAdapter]):
+        self.providers = providers
+
+    def search(self, query: str, asset_types: set[str], limit: int = 8) -> list[DiscoveredAsset]:
+        results: list[DiscoveredAsset] = []
+        for provider in self.providers:
+            results.extend(provider.search(query, asset_types, limit))
+        return results[:limit]
+
+    def download(self, asset: DiscoveredAsset) -> tuple[bytes, str]:
+        for provider in self.providers:
+            if provider.__class__.__name__.lower().startswith(asset.provider):
+                return provider.download(asset)
+        raise ValueError(f"asset provider is unavailable: {asset.provider}")
+
+
+class TranscriptionAdapter(ABC):
+    @abstractmethod
+    def transcribe(self, media_path: Path) -> list[dict[str, Any]]: ...
+
+
+class NullTranscriptionAdapter(TranscriptionAdapter):
+    def transcribe(self, media_path: Path) -> list[dict[str, Any]]:
+        raise RuntimeError(
+            "automatic transcription is not configured; paste a transcript or configure ALPHA_TRANSCRIPTION_COMMAND"
+        )
+
+
+class CommandTranscriptionAdapter(TranscriptionAdapter):
+    """Runs an administrator-configured Whisper-compatible command without a shell."""
+
+    def __init__(self, command: str, timeout_seconds: int = 1800):
+        self.command = command
+        self.timeout_seconds = timeout_seconds
+
+    def transcribe(self, media_path: Path) -> list[dict[str, Any]]:
+        with TemporaryDirectory(prefix="alpha-transcribe-") as directory:
+            output_dir = Path(directory)
+            tokens = [
+                token.replace("{input}", str(media_path)).replace("{output_dir}", str(output_dir))
+                for token in shlex.split(self.command)
+            ]
+            if not tokens:
+                raise RuntimeError("ALPHA_TRANSCRIPTION_COMMAND is empty")
+            subprocess.run(tokens, check=True, capture_output=True, timeout=self.timeout_seconds)
+            candidates = sorted(output_dir.glob("*.json"))
+            if not candidates:
+                raise RuntimeError("transcription command produced no JSON output")
+            payload = json.loads(candidates[0].read_text(encoding="utf-8"))
+            rows = payload.get("segments", payload if isinstance(payload, list) else [])
+            segments = [
+                {
+                    "start_ms": round(float(row.get("start", 0)) * 1000),
+                    "end_ms": round(float(row.get("end", 0)) * 1000),
+                    "text": str(row.get("text") or "").strip(),
+                }
+                for row in rows
+                if str(row.get("text") or "").strip()
+            ]
+            if not segments:
+                raise RuntimeError("transcription command returned no timestamped segments")
+            return segments
 
 
 class SourceProvider(ABC):
@@ -746,31 +1019,47 @@ class Renderer:
                     "-i",
                     str(source_path),
                 ]
-                crop = spec.get("crop", {}).get("adjustment", "center")
-                x = (
-                    "0"
-                    if crop == "left"
-                    else ("in_w-out_w" if crop == "right" else "(in_w-out_w)/2")
-                )
-                y = "0" if crop == "up" else ("in_h-out_h" if crop == "down" else "(in_h-out_h)/2")
-                filters.append(
-                    "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
-                    f"crop=720:1280:x={x}:y={y}[base]"
-                )
-                base_label = "base"
-                if source_probe.get("has_audio"):
-                    audio_label = "0:a"
-                    next_input = 1
-                else:
+                if source_probe.get("media_kind") == "audio":
                     command += [
                         "-f",
                         "lavfi",
                         "-i",
-                        f"anullsrc=channel_layout=stereo:sample_rate=48000:d={duration}",
+                        f"color=c=0x172033:s=720x1280:r=24:d={duration}",
                     ]
-                    audio_label = "1:a"
+                    base_label = "1:v"
+                    audio_label = "0:a"
                     next_input = 2
-                renderer_name = "ffmpeg_authorised_source"
+                    renderer_name = "ffmpeg_authorised_audio"
+                else:
+                    crop = spec.get("crop", {}).get("adjustment", "center")
+                    x = (
+                        "0"
+                        if crop == "left"
+                        else ("in_w-out_w" if crop == "right" else "(in_w-out_w)/2")
+                    )
+                    y = (
+                        "0"
+                        if crop == "up"
+                        else ("in_h-out_h" if crop == "down" else "(in_h-out_h)/2")
+                    )
+                    filters.append(
+                        "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
+                        f"crop=720:1280:x={x}:y={y}[base]"
+                    )
+                    base_label = "base"
+                    if source_probe.get("has_audio"):
+                        audio_label = "0:a"
+                        next_input = 1
+                    else:
+                        command += [
+                            "-f",
+                            "lavfi",
+                            "-i",
+                            f"anullsrc=channel_layout=stereo:sample_rate=48000:d={duration}",
+                        ]
+                        audio_label = "1:a"
+                        next_input = 2
+                    renderer_name = "ffmpeg_authorised_source"
             else:
                 command += [
                     "-f",

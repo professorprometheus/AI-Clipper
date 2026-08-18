@@ -75,6 +75,20 @@ Transcripts are currently database-backed. FFmpeg intermediates are reproducible
 - local/open-source transcription adapter (Whisper-compatible)
 - optional remote transcription adapter behind interface
 
+Uploaded authorised video/audio is probed and passed to a configured command adapter using
+`{input}` and `{output_dir}` placeholders. The command must emit JSON timestamp segments. The
+media object, transcript, exact approved-source link and rights attestation are persisted before
+pipeline execution; no worker-local path is durable state.
+
+### Rights-safe asset discovery
+- reusable Asset cache is searched before any network provider;
+- Openverse provides filtered commercial/modification-compatible image results;
+- Pexels optionally provides licensed photo/video results when its API key is configured;
+- provider interfaces keep additional authorised catalogues replaceable;
+- semantic ranking uses the moment, purpose, topic, emotion and punchline signals;
+- provider/source/licence/attribution metadata and object URI are persisted together;
+- an unavailable or unsuitable asset produces an explicit omission decision, not a job failure.
+
 ### AI layer
 Provider abstraction:
 - classify_content()
@@ -133,7 +147,9 @@ Campaign
 - platform/program
 - campaign_url
 - payout_model
-- payout_value
+- payout_amount
+- views_per_payout_unit
+- payout_rules_json
 - currency
 - deadline
 - status
@@ -159,6 +175,8 @@ ApprovedSource
 - duration
 - status
 - metadata_json
+- pasted_transcript_json
+- transcript_timestamped
 
 SourceItem
 Represents a resolved concrete item. A playlist may resolve to many SourceItems.
@@ -337,12 +355,17 @@ STAGE 2 ingest_sources
 - chunk with timestamps;
 - embed/index.
 
-STAGE 3 analyse_successful_examples
+STAGE 3 preflight_sources
+- compute metadata/transcript/media/research/render readiness for every approved source;
+- require at least one transcript-bearing, renderable approved source before long research;
+- stop as `ACTION REQUIRED` with exact missing source IDs and remediation when impossible.
+
+STAGE 4 analyse_successful_examples
 - ingest example metadata/transcript where permitted;
 - derive hook/topic/structure/style labels;
 - infer provisional style profile.
 
-STAGE 4 social_research
+STAGE 5 social_research
 - generate research plan from campaign/examples;
 - collect available/permitted observations;
 - consume audited manual ResearchImport records when a live provider is unavailable;
@@ -351,19 +374,19 @@ STAGE 4 social_research
 - analyse successful clipping channels where available;
 - store raw evidence and derived signals.
 
-STAGE 5 synthesize_strategy
+STAGE 6 synthesize_strategy
 - infer style profiles;
 - rank trend/angle opportunities;
 - produce strategy brief;
 - explicitly state uncertainty/data gaps.
 
-STAGE 6 discover_candidates
+STAGE 7 discover_candidates
 - semantic search over every approved SourceItem;
 - independent pass for funny/surprising/emotional/insightful moments;
 - detect likely duplicate/overused moments;
 - create candidate windows.
 
-STAGE 7 rank_candidates
+STAGE 8 rank_candidates
 - score candidate quality;
 - research alignment;
 - source saturation;
@@ -372,12 +395,19 @@ STAGE 7 rank_candidates
 - hook;
 - predicted return proxy;
 - diversification.
+- if ordinary discovery is empty, broaden across funny, surprising, controversial, emotional,
+  story, useful and quotable moments; otherwise stop as `ACTION REQUIRED`.
 
-STAGE 8 render
+STAGE 9 plan_enrichment
+- record evidence-based decisions for every permitted enrichment type;
+- choose cache-first, rights-safe external assets only when the clip benefits;
+- persist provider/licence/reason lineage before rendering.
+
+STAGE 10 render
 - render selected candidates using chosen style profiles;
 - enforce deterministic requirements.
 
-STAGE 9 qa
+STAGE 11 qa
 - ffprobe checks;
 - duration/aspect/resolution;
 - required watermark/branding;
@@ -385,31 +415,32 @@ STAGE 9 qa
 - permitted source provenance;
 - AI-evaluated checks separated and labelled;
 - fail closed for deterministic mandatory requirements.
+- zero passing clips becomes `ACTION REQUIRED` with the blocking mandatory rules.
 
-STAGE 10 review_ready
+STAGE 12 review_ready
 - persist clip bundle;
 - generate evidence-backed review explanations;
 - email user;
 - job status = awaiting_review.
 
-STAGE 11 user_review
+POST-PIPELINE user_review
 External to worker:
 - approve/change/reject.
 Changes create child render jobs rather than mutating history.
 
-STAGE 12 publish
+POST-PIPELINE publish
 - only approved variants;
 - platform adapter;
 - retain receipt/external ID.
 Fallback to export/manual post if API unsupported.
 
-STAGE 13 measure
+POST-PIPELINE measure
 - capture metrics when available;
 - allow manual metric entry;
 - compute outcome metrics;
 - associate Content Rewards acceptance/revenue.
 
-STAGE 14 learn
+POST-PIPELINE learn
 - add research ledger entries;
 - update configurable strategy weights;
 - create candidate hypotheses;
@@ -447,12 +478,22 @@ A 72-hour campaign processing job is acceptable. The architecture must not assum
 
 The Render Blueprint is a diskless free web service. Application/queue/history state is in external Postgres and durable artefacts use private S3-compatible storage. FFmpeg downloads authorised inputs to an invocation-scoped temporary directory, renders sequentially, uploads the final object, and then commits its `ClipVariant`; no temporary path is durable state.
 
-The web instance has no embedded production worker and may sleep or be destroyed safely. A scheduled GitHub Actions job starts a fresh worker hourly and processes at most three leased stages. Each invocation can therefore resume a campaign from Postgres, including expired leases and persisted retries. The same worker command can move later to continuous compute without changing queue semantics.
+The web instance has no embedded production worker and may sleep or be destroyed safely. A
+scheduled GitHub Actions job starts a fresh worker hourly and may process all 13 checkpointed stages
+inside a bounded 120-minute invocation. Each invocation can resume a campaign from Postgres,
+including expired leases and persisted retries. The same worker command can move later to
+continuous compute without changing queue semantics.
 
 Recommended initial providers are Neon Free Postgres, Cloudflare R2 Standard storage and a Render Free web service. Compute-heavy FFmpeg work runs on a standard GitHub-hosted Linux runner instead of a CPU-limited edge/serverless request. Public repositories receive free standard-runner usage; private GitHub Free repositories have a 2,000-minute monthly allowance, so the hourly schedule consumes at least roughly 720 rounded job-minutes per 30-day month before active render time.
 ## Creative enrichment boundary
 
-Campaign intake stores the unmodified brief and a structured, fail-closed `EnrichmentControls` document. User-supplied campaign assets enter through the same private storage abstraction used by renders; the database keeps semantic metadata, media probe, licence, commercial-use permission, attribution, restrictions, hash and rights attestation. Planner eligibility checks both the row and the backing object.
+Campaign intake stores the unmodified brief and six fail-closed permissions in an
+`EnrichmentControls` document; it does not ask normal users to curate an asset catalogue. The
+planner searches reusable global/campaign Asset rows first and only then calls configured discovery
+providers. Discovered objects enter the same private storage abstraction used by renders; the
+database keeps provider identity, source, semantic metadata, media probe, licence, commercial-use
+permission, attribution, restrictions and rights provenance. Planner eligibility checks both the
+row and the backing object.
 
 `rank_candidates → plan_enrichment → render → qa` is the durable path. One versioned Enrichment Plan exists for each candidate/clip version. It contains timestamped external or native events and measurable strategy features. The FFmpeg renderer materialises private objects only into disposable staging, composes audio/video sequentially, uploads the final clip, and records its verified URI and probe. Stateless worker loss therefore cannot erase the plan or output.
 

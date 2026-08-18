@@ -32,6 +32,10 @@ what should Alpha publish next to maximise expected return?
    - required branding/watermarks;
    - restrictions;
    - target social accounts/platforms.
+   Payout economics are expressed as an amount, currency and arbitrary qualified-view block
+   size (for example £4 per 2,000 views), plus any campaign threshold, cap or rounding rules.
+   An approved YouTube URL must also have accessible captions, a pasted transcript, or an
+   exact-source rights-attested video/audio upload before it can become render-ready.
 4. User submits.
 5. User may close the browser and switch off their laptop.
 6. Alpha performs asynchronous server-side work:
@@ -74,6 +78,8 @@ what should Alpha publish next to maximise expected return?
 - AI-evaluated requirements must be stored separately from deterministic requirements.
 - No campaign source outside the approved-source set may be used for the published clip unless the campaign explicitly permits external material.
 - Platform terms, access rights and source-authorisation restrictions must be respected.
+- A valid run targets at least one reviewable clip; zero-candidate or zero-render outcomes become
+  `ACTION REQUIRED` with a precise remediation instead of silently succeeding.
 
 ## 5. Research doctrine
 
@@ -192,11 +198,20 @@ Alpha should compare user preference against market results and surface meaningf
 
 ## 10. Campaign-aware creative enrichment
 
-Enrichment is an optional, evidence-driven strategy rather than decoration. The raw campaign brief remains the source record, while structured controls fail closed for music, memes/reactions, B-roll, sound effects and external image/video. A renderer may use external media only when the asset has recorded rights, licence, commercial-use and campaign provenance.
+Enrichment is an optional, evidence-driven strategy rather than decoration. Campaign intake asks
+only which enrichment classes are permitted and captures unusual restrictions. ALPHA searches its
+rights-safe cache first, then extensible authorised/free providers, and may omit enrichment when no
+verified asset is suitable. The raw campaign brief remains the source record, while structured
+controls fail closed for music, memes/reactions, B-roll, sound effects and external image/video. A
+renderer may use external media only when the asset has recorded provider, source URL, licence,
+attribution, commercial-use and campaign provenance.
 
 Each selected moment receives a versioned Enrichment Plan containing exact timing, duration, purpose, reason and asset lineage. Candidate suitability, successful-example feature evidence and campaign permissions inform that decision. Features that cannot be measured from public evidence must be labelled unavailable rather than invented. Native edits such as punch-ins, crops, freeze frames and emphasis graphics remain available without external copyright dependencies.
 
-Enrichment choices are stored as measurable strategy features with the immutable clip version. Human edits create child plans, and performance experiments compare strategies such as music/silence, meme/no-meme, B-roll density and zoom timing without assuming that enrichment helps.
+Enrichment choices—including explicit reasons for use or omission—are stored as measurable
+strategy features with the immutable clip version. Human edits create child plans, and performance
+experiments compare strategies such as music/silence, meme/no-meme, B-roll density and zoom timing
+without assuming that enrichment helps.
 
 ## 11. V0 success criteria
 

@@ -27,6 +27,9 @@ from .domain import (
 from .live_providers import LiveResearchProvider, YouTubeAPIClient, YouTubeSourceProvider
 from .providers import (
     AIAdapter,
+    AssetDiscoveryAdapter,
+    CommandTranscriptionAdapter,
+    CompositeAssetDiscoveryAdapter,
     EmailAdapter,
     FileEmailAdapter,
     FixtureResearchProvider,
@@ -35,22 +38,36 @@ from .providers import (
     ManualExportAdapter,
     ManualImportSourceProvider,
     ManualResearchProvider,
+    NullAssetDiscoveryAdapter,
+    NullTranscriptionAdapter,
+    OpenverseAssetDiscoveryAdapter,
+    PexelsAssetDiscoveryAdapter,
     PublicationAdapter,
     Renderer,
     ResearchProvider,
     ResendEmailAdapter,
     SourceProvider,
     StorageAdapter,
+    TranscriptionAdapter,
     build_storage,
     stable_id,
 )
 
 logger = logging.getLogger("alpha.pipeline")
 
+
+class ActionRequiredError(ValueError):
+    def __init__(self, message: str, code: str, details: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.code = code
+        self.details = details or {}
+
+
 STAGES = [
     "validate_campaign",
     "resolve_sources",
     "ingest_sources",
+    "preflight_sources",
     "analyse_successful_examples",
     "social_research",
     "synthesize_strategy",
@@ -89,6 +106,8 @@ class Providers:
     publication: PublicationAdapter
     renderer: Renderer
     ai: AIAdapter
+    assets: AssetDiscoveryAdapter
+    transcriber: TranscriptionAdapter
 
     @classmethod
     def build(cls, settings: Settings) -> Providers:
@@ -139,6 +158,31 @@ class Providers:
             publication=ManualExportAdapter(storage),
             renderer=Renderer(storage),
             ai=LocalHeuristicAIAdapter(),
+            assets=(
+                CompositeAssetDiscoveryAdapter(
+                    [
+                        OpenverseAssetDiscoveryAdapter(
+                            settings.openverse_api_token,
+                            timeout_seconds=settings.asset_discovery_timeout_seconds,
+                            max_bytes=settings.asset_discovery_max_bytes,
+                        ),
+                        PexelsAssetDiscoveryAdapter(
+                            settings.pexels_api_key,
+                            timeout_seconds=settings.asset_discovery_timeout_seconds,
+                            max_bytes=settings.asset_discovery_max_bytes,
+                        ),
+                    ]
+                )
+                if settings.provider_mode == "live"
+                else NullAssetDiscoveryAdapter()
+            ),
+            transcriber=(
+                CommandTranscriptionAdapter(
+                    settings.transcription_command, settings.transcription_timeout_seconds
+                )
+                if settings.transcription_command
+                else NullTranscriptionAdapter()
+            ),
         )
 
 
@@ -151,6 +195,7 @@ class Pipeline:
             "validate_campaign": self.validate_campaign,
             "resolve_sources": self.resolve_sources,
             "ingest_sources": self.ingest_sources,
+            "preflight_sources": self.preflight_sources,
             "analyse_successful_examples": self.analyse_successful_examples,
             "social_research": self.social_research,
             "synthesize_strategy": self.synthesize_strategy,
@@ -215,13 +260,13 @@ class Pipeline:
         )
         if not job:
             raise KeyError("campaign job not found")
-        if job["status"] != "failed":
-            raise PermissionError("only a failed campaign job can be retried")
+        if job["status"] not in {"failed", "action_required"}:
+            raise PermissionError("only a failed or action-required campaign job can be retried")
         timestamp = now()
         updated = self.db.execute(
             "UPDATE pipeline_jobs SET status='queued',attempts=0,error_json=NULL,available_at=?,"
             "worker_token=NULL,lease_expires_at=NULL,heartbeat_at=NULL,updated_at=? "
-            "WHERE id=? AND status='failed'",
+            "WHERE id=? AND status IN ('failed','action_required')",
             (timestamp, timestamp, job["id"]),
         )
         if not updated:
@@ -371,9 +416,12 @@ class Pipeline:
             stop_heartbeat.set()
             heartbeat_thread.join(timeout=max(1.0, self.settings.lease_seconds))
             attempts = int(job["attempts"]) + 1
+            action_required = isinstance(exc, ActionRequiredError)
             deterministic_failure = isinstance(exc, (KeyError, PermissionError, ValueError))
             status = (
-                "failed"
+                "action_required"
+                if action_required
+                else "failed"
                 if deterministic_failure or attempts >= self.settings.max_job_attempts
                 else "retry"
             )
@@ -388,6 +436,8 @@ class Pipeline:
                 "stage": stage,
                 "retryable": status == "retry",
             }
+            if action_required:
+                error.update({"code": exc.code, "details": exc.details})
             updated = self.db.execute(
                 "UPDATE pipeline_jobs SET status=?,attempts=?,error_json=?,worker_token=NULL,"
                 "lease_expires_at=NULL,available_at=?,updated_at=? "
@@ -406,7 +456,9 @@ class Pipeline:
                 "UPDATE pipeline_stage_attempts SET status='failed',output_json=?,completed_at=? WHERE id=?",
                 (dump(error), now(), stage_run_id),
             )
-            if status == "failed" and updated:
+            if status == "action_required" and updated:
+                self._notify_action_required(job, stage, error)
+            elif status == "failed" and updated:
                 self._notify_terminal_failure(job, stage, error)
             logger.error(
                 dump(
@@ -465,9 +517,43 @@ class Pipeline:
             if result is None:
                 break
             results.append(result)
-            if result["status"] == "failed":
+            if result["status"] in {"failed", "action_required"}:
                 break
         return results
+
+    def _notify_action_required(
+        self, job: dict[str, Any], stage: str, error: dict[str, Any]
+    ) -> None:
+        campaign = self._campaign(job["campaign_id"])
+        key = f"action-required:{job['id']}:{stage}:{error.get('code', 'input')}"
+        if self.db.one("SELECT id FROM notifications WHERE idempotency_key=?", (key,)):
+            return
+        remediation = error.get("details", {}).get("remediation", "Open the campaign for details.")
+        body = (
+            f"ALPHA needs source material before it can continue '{campaign['name']}'. "
+            f"{error['message']} {remediation} Open the campaign: "
+            f"{self.settings.base_url}/?campaign={job['campaign_id']}"
+        )
+        uri = self.providers.email.send(
+            campaign["owner_email"], f"{campaign['name']} — action required", body, key
+        )
+        self.db.execute(
+            "INSERT INTO notifications(id,campaign_id,notification_type,idempotency_key,recipient,file_uri,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                uid(),
+                job["campaign_id"],
+                "action_required",
+                key,
+                campaign["owner_email"],
+                uri,
+                now(),
+            ),
+        )
+        self.db.execute(
+            "UPDATE campaigns SET status='action_required',updated_at=? WHERE id=?",
+            (now(), job["campaign_id"]),
+        )
 
     def _campaign(self, campaign_id: str) -> dict[str, Any]:
         campaign = self.db.one("SELECT * FROM campaigns WHERE id=?", (campaign_id,))
@@ -560,12 +646,15 @@ class Pipeline:
                     for item in resolved_items:
                         linked = linked_media.get(item["external_id"])
                         if linked:
+                            with self.providers.storage.materialize(linked["media_uri"]) as media:
+                                linked_probe = self.providers.renderer.probe_asset(media)
                             item["metadata"].update(
                                 {
                                     "asset_uri": linked["media_uri"],
                                     "media_sha256": linked["media_sha256"],
                                     "linked_media_id": linked["id"],
                                     "rights_attested_at": linked["rights_attested_at"],
+                                    "probe": linked_probe,
                                 }
                             )
             except Exception as exc:
@@ -626,6 +715,10 @@ class Pipeline:
         transcript_failed_items: set[str] = set()
         for item in items:
             metadata = load(item["metadata_json"], {})
+            approved_source = self.db.one(
+                "SELECT * FROM approved_sources WHERE id=?", (item["approved_source_id"],)
+            )
+            segments: list[dict[str, Any]] = []
             if metadata.get("provider") == "authorised_upload":
                 imported = self.db.one(
                     "SELECT i.transcript_json FROM source_imports i "
@@ -639,20 +732,60 @@ class Pipeline:
                     (metadata["linked_media_id"],),
                 )
                 segments = load(imported["transcript_json"], []) if imported else []
-            else:
+            if not segments and approved_source and approved_source.get("pasted_transcript_json"):
+                pasted = load(approved_source["pasted_transcript_json"], None)
+                if isinstance(pasted, list):
+                    segments = pasted
+                    metadata["transcript_timing"] = "user_supplied"
+                else:
+                    text = str((pasted or {}).get("text") or "").strip()
+                    sentences = [
+                        sentence.strip()
+                        for sentence in re.split(r"(?<=[.!?])\s+|\n+", text)
+                        if sentence.strip()
+                    ]
+                    duration = max(1000, int(item["duration_ms"] or 0))
+                    window = max(1000, duration // max(1, len(sentences)))
+                    segments = [
+                        {
+                            "start_ms": min(index * window, duration - 1),
+                            "end_ms": min(duration, (index + 1) * window),
+                            "text": sentence,
+                        }
+                        for index, sentence in enumerate(sentences)
+                    ]
+                    metadata["transcript_timing"] = "estimated_from_video_duration"
+                    metadata["transcript_limitation"] = (
+                        "Pasted transcript had no timestamps; timing was proportionally estimated."
+                    )
+            if not segments:
                 try:
                     segments = self.providers.source.transcript(item, seeds)
                 except Exception as exc:
-                    transcript_failed_items.add(item["id"])
                     metadata["transcript_error"] = {
                         "type": type(exc).__name__,
                         "message": redact_secrets(str(exc)),
                     }
-                    self.db.execute(
-                        "UPDATE source_items SET metadata_json=? WHERE id=?",
-                        (dump(metadata), item["id"]),
-                    )
-                    segments = []
+            if not segments and metadata.get("asset_uri"):
+                try:
+                    with self.providers.storage.materialize(metadata["asset_uri"]) as local_media:
+                        segments = self.providers.transcriber.transcribe(local_media)
+                    metadata["transcript_timing"] = "automatic_whisper_timestamped"
+                    if metadata.get("linked_media_id"):
+                        self.db.execute(
+                            "UPDATE linked_source_media SET transcript_json=? WHERE id=?",
+                            (dump(segments), metadata["linked_media_id"]),
+                        )
+                    elif metadata.get("provider") == "authorised_upload":
+                        self.db.execute(
+                            "UPDATE source_imports SET transcript_json=? WHERE approved_source_id=?",
+                            (dump(segments), item["approved_source_id"]),
+                        )
+                except Exception as exc:
+                    metadata["transcript_error"] = {
+                        "type": type(exc).__name__,
+                        "message": redact_secrets(str(exc)),
+                    }
             for segment in segments:
                 self.db.execute(
                     "INSERT INTO transcript_segments(id,source_item_id,start_ms,end_ms,text,embedding_json) "
@@ -673,6 +806,12 @@ class Pipeline:
                     "UPDATE source_items SET metadata_json=? WHERE id=?",
                     (dump(metadata), item["id"]),
                 )
+            elif metadata.get("transcript_timing"):
+                metadata["transcript_status"] = "ready"
+                self.db.execute(
+                    "UPDATE source_items SET metadata_json=? WHERE id=?",
+                    (dump(metadata), item["id"]),
+                )
         self._record_provider_events(campaign_id, self.providers.source)
         total = self.db.one(
             "SELECT COUNT(*) AS n FROM transcript_segments t JOIN source_items s ON s.id=t.source_item_id "
@@ -684,6 +823,54 @@ class Pipeline:
             "indexed_source_items": len(items) - len(transcript_failed_items),
             "transcript_unavailable": len(transcript_failed_items),
         }
+
+    def preflight_sources(self, campaign_id: str, job_id: str) -> dict[str, Any]:
+        items = self.db.all("SELECT * FROM source_items WHERE campaign_id=?", (campaign_id,))
+        readiness = []
+        for item in items:
+            metadata = load(item["metadata_json"], {})
+            transcript_count = self.db.one(
+                "SELECT COUNT(*) AS n FROM transcript_segments WHERE source_item_id=?",
+                (item["id"],),
+            )["n"]
+            fixture_renderable = self.settings.provider_mode == "fixture"
+            media_ready = bool(metadata.get("asset_uri")) or fixture_renderable
+            readiness.append(
+                {
+                    "source_item_id": item["id"],
+                    "external_id": item["external_id"],
+                    "metadata_ready": True,
+                    "transcript_ready": bool(transcript_count),
+                    "media_ready": media_ready,
+                    "render_ready": bool(transcript_count) and media_ready,
+                    "transcript_timing": metadata.get("transcript_timing", "provider_timestamped"),
+                }
+            )
+        render_ready = [row for row in readiness if row["render_ready"]]
+        if not render_ready:
+            missing_transcript = [
+                row["external_id"] for row in readiness if not row["transcript_ready"]
+            ]
+            missing_media = [row["external_id"] for row in readiness if not row["media_ready"]]
+            blockers = []
+            if missing_transcript:
+                blockers.append("no accessible or pasted timestamped transcript")
+            if missing_media:
+                blockers.append("no authorised renderable video/audio")
+            raise ActionRequiredError(
+                "Source material is not render-ready: " + "; ".join(blockers) + ".",
+                "source_material_required",
+                {
+                    "missing_transcript_external_ids": missing_transcript,
+                    "missing_media_external_ids": missing_media,
+                    "remediation": (
+                        "Paste a transcript and upload authorised video/audio for the exact approved "
+                        "YouTube source, then retry from this checkpoint."
+                    ),
+                    "readiness": readiness,
+                },
+            )
+        return {"ready_sources": len(render_ready), "sources": readiness}
 
     def analyse_successful_examples(self, campaign_id: str, job_id: str) -> dict[str, Any]:
         examples = self.db.all(
@@ -953,6 +1140,7 @@ class Pipeline:
         }
 
     def discover_candidates(self, campaign_id: str, job_id: str) -> dict[str, Any]:
+        campaign = self._campaign(campaign_id)
         clusters = self.db.all(
             "SELECT * FROM trend_clusters WHERE campaign_id=? ORDER BY lifecycle_state",
             (campaign_id,),
@@ -1028,6 +1216,9 @@ class Pipeline:
                     segment["text"], similarity, example_count, source_index, saturation
                 )
                 predicted = weighted_score(scores, weights)
+                unit = int(campaign.get("views_per_payout_unit") or 1)
+                amount = float(campaign.get("payout_amount") or 0)
+                expected_at_10k = 10_000 / unit * amount
                 candidate_id = uid()
                 self.db.execute(
                     "INSERT INTO candidate_moments(id,campaign_id,source_item_id,start_ms,end_ms,transcript,"
@@ -1043,7 +1234,20 @@ class Pipeline:
                         segment["end_ms"],
                         segment["text"],
                         pass_name,
-                        dump({"query": query_text, "similarity": round(similarity, 4)}),
+                        dump(
+                            {
+                                "query": query_text,
+                                "similarity": round(similarity, 4),
+                                "expected_value": {
+                                    "qualified_view_scenario": 10_000,
+                                    "currency": campaign.get("currency", "GBP"),
+                                    "gross_revenue": round(expected_at_10k, 2),
+                                    "score_adjusted_revenue": round(expected_at_10k * predicted, 2),
+                                    "payout_amount": amount,
+                                    "views_per_payout_unit": unit,
+                                },
+                            }
+                        ),
                         dump(evidence_ids),
                         dump(scores),
                         f"{pass_name.replace('_', ' ').title()} from approved source; strong hook and evidence alignment.",
@@ -1103,6 +1307,70 @@ class Pipeline:
             "SELECT * FROM candidate_moments WHERE campaign_id=? ORDER BY predicted_score DESC",
             (campaign_id,),
         )
+        if not candidates:
+            segments = self.db.all(
+                "SELECT t.*,s.campaign_id,s.id AS source_item_id FROM transcript_segments t "
+                "JOIN source_items s ON s.id=t.source_item_id WHERE s.campaign_id=?",
+                (campaign_id,),
+            )
+            if segments:
+                interest_terms = {
+                    "funny",
+                    "surprising",
+                    "controversial",
+                    "emotional",
+                    "story",
+                    "useful",
+                    "insight",
+                    "why",
+                    "because",
+                    "mistake",
+                    "truth",
+                }
+                strongest = max(
+                    segments,
+                    key=lambda row: (
+                        sum(term in row["text"].lower() for term in interest_terms),
+                        min(len(row["text"]), 500),
+                    ),
+                )
+                policy = self.db.one(
+                    "SELECT * FROM strategy_policies WHERE active=1 ORDER BY version DESC LIMIT 1"
+                )
+                scores = candidate_scores(strongest["text"], 0.2, 0, 0, 0.1)
+                candidate_id = uid()
+                self.db.execute(
+                    "INSERT INTO candidate_moments(id,campaign_id,source_item_id,start_ms,end_ms,transcript,"
+                    "discovery_pass,research_match_json,evidence_ids_json,scores_json,selection_reason,"
+                    "saturation_json,predicted_score,policy_id,status,enrichment_suitability_json) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        candidate_id,
+                        campaign_id,
+                        strongest["source_item_id"],
+                        strongest["start_ms"],
+                        strongest["end_ms"],
+                        strongest["text"],
+                        "broad_campaign_compliant_fallback",
+                        dump(
+                            {
+                                "query": "broad funny surprising controversial emotional useful quotable"
+                            }
+                        ),
+                        "[]",
+                        dump(scores),
+                        "Fallback selected the strongest standalone moment after broadening all non-mandatory discovery signals.",
+                        dump({"score": 0.1, "method": "fallback_low-saturation-default"}),
+                        weighted_score(scores, load(policy["weights_json"])),
+                        policy["id"],
+                        "discovered",
+                        dump(enrichment_suitability(strongest["text"])),
+                    ),
+                )
+                candidates = self.db.all(
+                    "SELECT * FROM candidate_moments WHERE campaign_id=? ORDER BY predicted_score DESC",
+                    (campaign_id,),
+                )
         if self.settings.provider_mode == "live":
             candidates.sort(
                 key=lambda candidate: bool(
@@ -1135,7 +1403,13 @@ class Pipeline:
                 ("selected" if candidate["id"] in selected_ids else "ranked", candidate["id"]),
             )
         if not candidates:
-            raise ValueError("no candidate moments discovered")
+            raise ActionRequiredError(
+                "No campaign-compliant candidate moment could be discovered from the available source material.",
+                "no_candidate_moments",
+                {
+                    "remediation": "Add a usable timestamped transcript or another approved source, then retry."
+                },
+            )
         winner = candidates[0]
         return {
             "ranked": len(candidates),
@@ -1224,6 +1498,149 @@ class Pipeline:
         ]
         return max(choices, key=lambda asset: cosine(asset["embedding"], query), default=None)
 
+    def _discover_and_cache_asset(
+        self,
+        campaign_id: str,
+        asset_types: set[str],
+        candidate: dict[str, Any],
+        controls: dict[str, Any],
+        purpose: str,
+    ) -> dict[str, Any] | None:
+        query_text = " ".join(
+            [
+                candidate["transcript"],
+                purpose,
+                str(load(candidate.get("enrichment_suitability_json"), {})),
+            ]
+        )
+        results = self.providers.assets.search(query_text, asset_types, limit=10)
+        eligible = [
+            result
+            for result in results
+            if result.permitted_commercial_use
+            and result.permits_modification
+            and result.licence
+            and result.source_url
+            and result.asset_type not in set(controls.get("prohibited_asset_types", []))
+        ]
+        query_vector = embedding(query_text)
+        eligible.sort(
+            key=lambda result: cosine(
+                embedding(
+                    " ".join([result.title, result.semantic_description, *result.tags, purpose])
+                ),
+                query_vector,
+            ),
+            reverse=True,
+        )
+        for discovered in eligible:
+            existing = self.db.one(
+                "SELECT * FROM assets WHERE provider=? AND provider_asset_id=?",
+                (discovered.provider, discovered.provider_asset_id),
+            )
+            if existing and self.providers.storage.exists(existing["file_uri"]):
+                return self._select_asset(
+                    self._eligible_assets(campaign_id, controls),
+                    {existing["asset_type"]},
+                    query_text,
+                    controls,
+                    set(),
+                )
+            try:
+                content, content_type = self.providers.assets.download(discovered)
+                if not content:
+                    continue
+                suffix_by_type = {
+                    "image/jpeg": ".jpg",
+                    "image/png": ".png",
+                    "image/webp": ".webp",
+                    "image/x-portable-pixmap": ".ppm",
+                    "video/mp4": ".mp4",
+                    "audio/mpeg": ".mp3",
+                    "audio/wav": ".wav",
+                    "audio/x-wav": ".wav",
+                    "audio/ogg": ".ogg",
+                    "audio/flac": ".flac",
+                }
+                suffix = suffix_by_type.get(content_type.split(";", 1)[0].lower())
+                if not suffix:
+                    continue
+                asset_id = uid()
+                uri = self.providers.storage.put_bytes(
+                    f"assets/cache/{discovered.provider}/{stable_id(discovered.provider_asset_id, 20)}{suffix}",
+                    content,
+                    content_type,
+                )
+                probe: dict[str, Any] = {"media_kind": "image"}
+                duration_ms = discovered.duration_ms
+                if suffix in {".mp4", ".mp3", ".wav", ".ogg", ".flac"}:
+                    with self.providers.storage.materialize(uri) as local_asset:
+                        probe = self.providers.renderer.probe_asset(local_asset)
+                    if not probe["valid"]:
+                        self.providers.storage.delete(uri)
+                        continue
+                    duration_ms = probe["duration_ms"]
+                metadata = {
+                    "provider": discovered.provider,
+                    "provider_asset_id": discovered.provider_asset_id,
+                    "library": discovered.provider,
+                    "licence_url": discovered.licence_url,
+                    "content_type": content_type,
+                    "probe": probe,
+                    "automatically_discovered": True,
+                    "discovery_query": query_text[:1000],
+                }
+                self.db.execute(
+                    "INSERT INTO assets(id,campaign_id,asset_type,file_uri,title,tags_json,semantic_description,"
+                    "duration_ms,licence,permitted_commercial_use,attribution_requirement,source_url,"
+                    "campaign_restrictions_json,embedding_json,metadata_json,rights_attestation,provider,"
+                    "provider_asset_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT DO NOTHING",
+                    (
+                        asset_id,
+                        None,
+                        discovered.asset_type,
+                        uri,
+                        discovered.title,
+                        dump(discovered.tags),
+                        discovered.semantic_description,
+                        duration_ms,
+                        discovered.licence,
+                        1,
+                        discovered.attribution_requirement,
+                        discovered.source_url,
+                        "{}",
+                        dump(embedding(" ".join([discovered.title, *discovered.tags, purpose]))),
+                        dump(metadata),
+                        (
+                            "Automatically discovered from a provider result declaring commercial use "
+                            "and modification permission; licence metadata retained for review."
+                        ),
+                        discovered.provider,
+                        discovered.provider_asset_id,
+                        now(),
+                    ),
+                )
+                return self._select_asset(
+                    self._eligible_assets(campaign_id, controls),
+                    {discovered.asset_type},
+                    query_text,
+                    controls,
+                    set(),
+                )
+            except Exception as exc:
+                logger.warning(
+                    dump(
+                        {
+                            "event": "asset_discovery_candidate_rejected",
+                            "provider": discovered.provider,
+                            "provider_asset_id": discovered.provider_asset_id,
+                            "reason": redact_secrets(str(exc)),
+                        }
+                    )
+                )
+        return None
+
     def _event_from_asset(
         self,
         asset: dict[str, Any],
@@ -1253,6 +1670,8 @@ class Pipeline:
                 "attribution_requirement": asset.get("attribution_requirement"),
                 "attribution_text": asset.get("attribution_requirement"),
                 "source_url": asset.get("source_url"),
+                "provider": asset.get("provider") or asset.get("metadata", {}).get("provider"),
+                "licence_url": asset.get("metadata", {}).get("licence_url"),
                 "library": asset.get("metadata", {}).get("library"),
                 "campaign_restrictions": asset.get("campaign_restrictions", {}),
                 "rights_attestation": asset["rights_attestation"],
@@ -1273,7 +1692,7 @@ class Pipeline:
             "external_images_allowed": False,
             "external_video_allowed": False,
             "prohibited_asset_types": [],
-            "max_inserts": 0,
+            "max_inserts": 3,
             "max_insert_duration_seconds": 2.0,
             "music_volume_min_db": -30.0,
             "music_volume_max_db": -12.0,
@@ -1291,6 +1710,16 @@ class Pipeline:
 
         music_signal = suitability.get("music_suitability", {}).get("value")
         music = self._select_asset(assets, {"music"}, candidate["transcript"], controls, used)
+        if (
+            not music
+            and controls.get("music_allowed")
+            and music_signal is not None
+            and music_signal >= 0.5
+        ):
+            music = self._discover_and_cache_asset(
+                campaign_id, {"music"}, candidate, controls, "subtle emotional music bed"
+            )
+            assets = self._eligible_assets(campaign_id, controls)
         if music and music_signal is not None and music_signal >= 0.5:
             volume_db = min(-18.0, float(controls["music_volume_max_db"]))
             volume_db = max(volume_db, float(controls["music_volume_min_db"]))
@@ -1321,6 +1750,21 @@ class Pipeline:
             controls,
             used,
         )
+        if (
+            not meme
+            and controls.get("memes_allowed")
+            and controls.get("external_images_allowed")
+            and humour_signal is not None
+            and humour_signal >= 0.7
+        ):
+            meme = self._discover_and_cache_asset(
+                campaign_id,
+                {"meme_image", "reaction"},
+                candidate,
+                controls,
+                "reaction at the joke or punchline",
+            )
+            assets = self._eligible_assets(campaign_id, controls)
         if meme and max_inserts > 0 and humour_signal is not None and humour_signal >= 0.7:
             start = min(max(500, duration_ms // 3), max(0, duration_ms - 750))
             event_duration = min(
@@ -1340,6 +1784,17 @@ class Pipeline:
 
         context_signal = suitability.get("broll_suitability", {}).get("value")
         broll = self._select_asset(assets, {"broll"}, candidate["transcript"], controls, used)
+        if (
+            not broll
+            and controls.get("broll_allowed")
+            and controls.get("external_video_allowed")
+            and context_signal is not None
+            and context_signal >= 0.7
+        ):
+            broll = self._discover_and_cache_asset(
+                campaign_id, {"broll"}, candidate, controls, "illustrative contextual B-roll"
+            )
+            assets = self._eligible_assets(campaign_id, controls)
         external_inserts = sum(event["type"] != "music" for event in events)
         if (
             broll
@@ -1364,6 +1819,15 @@ class Pipeline:
             used.add(broll["id"])
 
         sfx = self._select_asset(assets, {"sfx"}, candidate["transcript"], controls, used)
+        if (
+            not sfx
+            and controls.get("sound_effects_allowed")
+            and humour_signal is not None
+            and humour_signal >= 0.7
+        ):
+            sfx = self._discover_and_cache_asset(
+                campaign_id, {"sfx"}, candidate, controls, "short punchline sound effect"
+            )
         external_inserts = sum(event["type"] != "music" for event in events)
         if (
             sfx
@@ -1414,6 +1878,29 @@ class Pipeline:
             )
 
         strategy = self._enrichment_strategy(events, duration_ms)
+        decisions = []
+        for label, permission, event_types, signal, threshold in (
+            ("music", "music_allowed", {"music"}, music_signal, 0.5),
+            (
+                "meme/reaction",
+                "memes_allowed",
+                {"meme_image", "meme_video", "reaction"},
+                humour_signal,
+                0.7,
+            ),
+            ("B-roll", "broll_allowed", {"broll"}, context_signal, 0.7),
+            ("sound effect", "sound_effects_allowed", {"sfx"}, humour_signal, 0.7),
+        ):
+            used_for_type = any(event.get("type") in event_types for event in events)
+            if not controls.get(permission):
+                reason = "campaign permission is disabled"
+            elif signal is None or signal < threshold:
+                reason = "candidate/style evidence did not justify it"
+            elif used_for_type:
+                reason = "evidence justified it and a rights-safe semantic match was available"
+            else:
+                reason = "no suitable rights-safe asset was available; enrichment was omitted"
+            decisions.append({"type": label, "used": used_for_type, "reason": reason})
         return {
             "planner": "local_evidence_enrichment_v1",
             "candidate_id": candidate["id"],
@@ -1427,6 +1914,7 @@ class Pipeline:
             "controls": controls,
             "suitability": suitability,
             "events": sorted(events, key=lambda event: event["start_ms"]),
+            "decisions": decisions,
             "strategy_features": strategy,
         }
 
@@ -1680,8 +2168,14 @@ class Pipeline:
             )
             rendered += 1
         if self.settings.provider_mode == "live" and rendered == 0:
-            raise ValueError(
-                "selected moments need rights-attested source media linked by YouTube video id before rendering"
+            raise ActionRequiredError(
+                "Selected moments have no rights-attested renderable source media.",
+                "renderable_source_media_required",
+                {
+                    "remediation": (
+                        "Upload authorised video/audio linked to the exact approved YouTube video, then retry."
+                    )
+                },
             )
         return {"rendered_variants": rendered, "renderer": "ffmpeg_with_manifest_fallback"}
 
@@ -1698,6 +2192,7 @@ class Pipeline:
             (campaign_id,),
         )
         passed = 0
+        blocking_keys: set[str] = set()
         for variant in variants:
             spec = load(variant["render_spec_json"])
             report = deterministic_qa(spec, requirements, approved_items)
@@ -1709,6 +2204,19 @@ class Pipeline:
                 (status, dump(report), dump(ai_report), variant["id"]),
             )
             passed += report["passed"]
+            blocking_keys.update(
+                check.get("key", "mandatory_requirement")
+                for check in report.get("blocking_failures", [])
+            )
+        if passed == 0:
+            raise ActionRequiredError(
+                "No rendered clip passed the campaign's mandatory deterministic requirements.",
+                "mandatory_requirements_impossible",
+                {
+                    "blocking_requirements": sorted(blocking_keys),
+                    "remediation": "Review the listed mandatory rules or supply compatible source material.",
+                },
+            )
         return {
             "variants": len(variants),
             "passed": passed,

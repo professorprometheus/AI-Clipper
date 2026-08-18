@@ -25,13 +25,13 @@ def test_worker_recovers_expired_lease_and_resumes_completed_stages(client, app)
     assert len(completed_before) == 4
 
     abandoned = pipeline.acquire("killed-worker")
-    assert abandoned["current_stage"] == "social_research"
+    assert abandoned["current_stage"] == "analyse_successful_examples"
     expired = (datetime.now(UTC) - timedelta(hours=73)).isoformat()
     app.state.db.execute(
         "UPDATE pipeline_jobs SET lease_expires_at=? WHERE id=?", (expired, job["id"])
     )
 
-    original = pipeline.stage_handlers["social_research"]
+    original = pipeline.stage_handlers["analyse_successful_examples"]
     calls = {"count": 0}
 
     def transient(campaign: str, job_id: str):
@@ -40,7 +40,7 @@ def test_worker_recovers_expired_lease_and_resumes_completed_stages(client, app)
             raise ConnectionError("fixture transient provider failure")
         return original(campaign, job_id)
 
-    pipeline.stage_handlers["social_research"] = transient
+    pipeline.stage_handlers["analyse_successful_examples"] = transient
     failed_attempt = pipeline.run_once("replacement-worker")
     assert failed_attempt["status"] == "retry"
     results = pipeline.run_until_idle("replacement-worker")
@@ -249,7 +249,7 @@ def test_experiment_assigns_control_and_treatment_before_prediction(client, app)
         "/api/campaigns", json=campaign_payload(source_count=8, example_count=3)
     ).json()["id"]
     client.post(f"/api/campaigns/{campaign_id}/submit")
-    for index in range(7):
+    for index in range(8):
         result = app.state.pipeline.run_once(f"assignment-worker-{index}")
         assert result["status"] == "queued"
     assignments = app.state.db.all(

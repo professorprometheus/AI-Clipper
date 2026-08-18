@@ -244,7 +244,7 @@ Context:
 The paid Render disk was the only mandatory infrastructure cost. Free web instances sleep and lose local files, while video rendering exceeds typical free edge-function CPU limits. Campaign work already consists of short leased, checkpointed, idempotent stages.
 
 Decision:
-Use `DATABASE_URL` for production Postgres and keep SQLite only as the local adapter. Use private S3-compatible object storage for uploads, watermarks, rendered clips and publication exports; local files are invocation-scoped staging only. Use Neon Free and Cloudflare R2 Standard as the initial providers. Deploy the UI/API on a diskless Render Free web service with its embedded worker disabled. Run all 12 campaign stages sequentially in one bounded 120-minute scheduled GitHub Actions invocation, with manual dispatch available for the first wake-up. Validate required external persistence and live-provider secrets before installing dependencies. PostgreSQL uses row locks with `SKIP LOCKED`, and deterministic render object keys make killed-render retries converge.
+Use `DATABASE_URL` for production Postgres and keep SQLite only as the local adapter. Use private S3-compatible object storage for uploads, watermarks, rendered clips and publication exports; local files are invocation-scoped staging only. Use Neon Free and Cloudflare R2 Standard as the initial providers. Deploy the UI/API on a diskless Render Free web service with its embedded worker disabled. Run all 13 campaign stages sequentially in one bounded 120-minute scheduled GitHub Actions invocation, with manual dispatch available for the first wake-up. Validate required external persistence and live-provider secrets before installing dependencies. PostgreSQL uses row locks with `SKIP LOCKED`, and deterministic render object keys make killed-render retries converge.
 
 Consequences:
 App and worker containers can restart independently without losing jobs, provenance, sessions, review history or clips. The browser and user's laptop are not workers. A healthy campaign can finish in one worker invocation instead of paying repeated checkout/install overhead and waiting between artificial three-stage batches. Provider/network failures retain bounded retry backoff, while deterministic domain/input failures stop immediately and make the worker process fail visibly instead of burning five invocations. Provider delays, retry backoff or the 120-minute cap can still defer remaining work to the next invocation without losing its checkpoint. The £0 target is genuine while Neon remains below 0.5 GB/100 CU-hours, R2 Standard remains below 10 GB-month/operation allowances, Render remains below its free limits, and GitHub Actions remains within its public/free or private included minutes. Scheduled Actions can be delayed, and a public repository disables schedules after 60 days without repository activity; both are operational limits, not durability failures.
@@ -282,5 +282,38 @@ Closing or refreshing the browser cannot alter execution, scheduled workers rema
 
 Alternatives considered:
 Running the worker synchronously from the browser, displaying an indefinite spinner for multi-hour work, and allowing deletion of submitted campaign history were rejected because they contradict unattended processing, conceal durable state or destroy lineage.
+
+---
+
+### ADR-016 — Preflighted sources, automatic licensed assets and explicit payout units
+Status: Accepted
+
+Context:
+A YouTube URL can resolve metadata while still lacking captions and authorised media, so allowing
+research to run first wastes remote worker time and can end with no render. Campaign-by-campaign
+asset uploads also push catalogue and licensing work onto users. A single per-view payout value
+cannot accurately represent Content Rewards block economics.
+
+Decision:
+Insert a durable source preflight before research. Accept accessible captions, pasted transcript, or
+exact-ID rights-attested uploaded media; transcribe uploads through a configurable
+Whisper-compatible command. Require a render-ready source and at least one compliant review clip,
+using `ACTION REQUIRED` plus idempotent email when remediation is needed. Replace normal intake
+asset uploads with six permissions and cache-first provider discovery. Retain provider, URL,
+licence, attribution and object provenance with every discovered asset and omit unsafe/unavailable
+enrichment. Model qualified-view payouts as amount/currency/per-unit plus optional rules and compute
+proportional revenue without assuming a 1,000-view unit.
+
+Consequences:
+Long research does not begin on unusable source material, zero-output runs cannot appear successful,
+and users need not repeatedly supply enrichment files or licence metadata. Plain transcripts have
+estimated timing unless aligned to media. Openverse can operate anonymously but Pexels requires a
+key; external catalogue metadata remains reviewable and does not itself guarantee ownership.
+Automatic transcription requires the configured command/model to exist in the worker environment.
+
+Alternatives considered:
+Continuing past missing media, silently completing with zero clips, scraping image search, random
+decoration, trusting unverified licence strings, and hardcoding 1,000-view payout blocks were
+rejected.
 
 ---

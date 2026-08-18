@@ -48,6 +48,12 @@ class Settings:
     s3_access_key_id: str = ""
     s3_secret_access_key: str = ""
     run_embedded_worker: bool = True
+    openverse_api_token: str = ""
+    pexels_api_key: str = ""
+    asset_discovery_timeout_seconds: float = 15.0
+    asset_discovery_max_bytes: int = 50_000_000
+    transcription_command: str = ""
+    transcription_timeout_seconds: int = 1800
 
     @property
     def database_target(self) -> str | Path:
@@ -115,4 +121,14 @@ class Settings:
             s3_secret_access_key=os.getenv("S3_SECRET_ACCESS_KEY", ""),
             run_embedded_worker=os.getenv("ALPHA_RUN_EMBEDDED_WORKER", "true").lower()
             in {"1", "true", "yes"},
+            openverse_api_token=os.getenv("OPENVERSE_API_TOKEN", ""),
+            pexels_api_key=os.getenv("PEXELS_API_KEY", ""),
+            asset_discovery_timeout_seconds=float(
+                os.getenv("ALPHA_ASSET_DISCOVERY_TIMEOUT_SECONDS", "15")
+            ),
+            asset_discovery_max_bytes=int(os.getenv("ALPHA_ASSET_DISCOVERY_MAX_BYTES", "50000000")),
+            transcription_command=os.getenv("ALPHA_TRANSCRIPTION_COMMAND", ""),
+            transcription_timeout_seconds=int(
+                os.getenv("ALPHA_TRANSCRIPTION_TIMEOUT_SECONDS", "1800")
+            ),
         )
