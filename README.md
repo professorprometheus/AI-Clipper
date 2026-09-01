@@ -1,234 +1,486 @@
-# ALPHA V0
+# AI Clipper — ALPHA V0
 
-ALPHA is a research-led clipping system. A campaign contains many approved source URLs, successful example clips, research seeds, economics, branding, and deterministic/AI-evaluated requirements. A durable database-backed worker researches, resolves and indexes every approved source, ranks timestamped moments with evidence, renders clips, blocks deterministic failures, emails a review link, preserves edits, and creates a publication export only after explicit human approval.
+A research-led system for discovering, evaluating and producing short-form social media clips from approved source content.
 
-Qualified-view economics use a payout amount, currency and arbitrary per-view block (for example
-£1.50 per 1,500 views), with optional thresholds, caps and rounding. ALPHA never assumes a 1,000-view block.
+AI Clipper is designed around **content reward campaigns**: a campaign can provide source videos, examples of successful clips, campaign requirements, branding and payout rules. The system researches the surrounding topic, analyses available source material, identifies promising timestamped moments, renders short-form clips and presents them for human review.
 
-The default path is local and free: SQLite, local files, generated authorised media, fixture research, a file email sink, and a manual publication export. No browser connection is needed after campaign submission.
+The project focuses not only on clip generation, but on building a **durable and auditable pipeline** that can process long-running campaigns without requiring a browser or a single worker process to remain online.
 
-## Quick start (Windows)
+> **Status:** Advanced V0 prototype. The core processing pipeline, local/demo environment and most production adapters are implemented. Some external platform integrations still require credentialled live validation before the system should be considered production-complete.
 
-Prerequisite: Python 3.11+.
+## The Problem
+
+Creating effective short-form clips from long-form content involves considerably more than cutting random sections from a video.
+
+A useful system needs to answer questions such as:
+
+* Which moments are actually worth clipping?
+* What topics or formats are currently relevant?
+* What made previous successful clips work?
+* Does a candidate satisfy campaign requirements?
+* Is the source material authorised and traceable?
+* How should the clip be edited for short-form platforms?
+* Did the final render actually meet the required technical rules?
+* How can human feedback and real-world performance improve future decisions?
+
+AI Clipper explores this as an **end-to-end research and media-processing problem**.
+
+## How It Works
+
+A campaign moves through a multi-stage processing pipeline:
+
+```text
+Campaign brief
+      ↓
+Source validation
+      ↓
+Source resolution & transcription
+      ↓
+Successful-example analysis
+      ↓
+Social / trend research
+      ↓
+Strategy generation
+      ↓
+Moment discovery
+      ↓
+Candidate ranking
+      ↓
+Creative enrichment planning
+      ↓
+FFmpeg rendering
+      ↓
+Deterministic & advisory QA
+      ↓
+Human review
+      ↓
+Approved export
+      ↓
+Performance feedback
+```
+
+Each processing stage is checkpointed so that interrupted jobs can resume rather than restarting from the beginning.
+
+## Campaign Intake
+
+Campaigns can contain:
+
+* multiple approved source URLs
+* examples of previously successful clips
+* research topics and keywords
+* campaign requirements
+* branding and watermark configuration
+* target social accounts
+* creative permissions
+* payout and qualified-view economics
+
+The system validates and normalises these inputs before processing begins.
+
+Source provenance is retained throughout the pipeline so that generated candidates can be traced back to approved campaign material.
+
+## Source Resolution & Transcription
+
+Source handling supports several workflows depending on available permissions and credentials.
+
+For YouTube content, the live adapter can work with:
+
+* YouTube Data API metadata
+* playlists expanded into individual videos
+* authorised caption tracks
+* supplied timestamped transcripts
+* rights-attested uploaded video/audio
+
+Uploaded media can also be passed to a configurable **Whisper-compatible transcription command** to generate timestamped transcript segments.
+
+A pre-processing readiness check verifies whether each source has the metadata, transcript and media required by later stages before expensive processing begins.
+
+## Social Research
+
+The research layer gathers evidence that can help inform clip selection.
+
+Adapters exist for sources including:
+
+* YouTube search and video statistics
+* TikTok public metadata
+* TikTok Research API where approved
+* Instagram professional-account research where configured
+* GDELT
+* Google News RSS
+
+Provider responses and failures are recorded separately so that the system can distinguish between:
+
+* unavailable information
+* provider limitations
+* actual negative evidence
+
+rather than silently treating missing data as meaningful data.
+
+## Example & Style Analysis
+
+Campaigns can include examples of clips that previously performed well.
+
+These are used to derive signals about characteristics such as:
+
+* pacing
+* subject matter
+* emotional tone
+* humour
+* surprise
+* controversy
+* usefulness
+* quotability
+* storytelling potential
+
+The analysis layer is designed behind a provider abstraction.
+
+The current local/free-capable implementation uses deterministic heuristics for several analysis tasks, while the architecture allows model-backed implementations to be introduced without coupling the core domain logic to a single AI provider.
+
+## Candidate Discovery & Ranking
+
+Timestamped source material is searched for potentially valuable moments.
+
+Candidates can be evaluated using signals such as:
+
+* relevance to campaign research
+* similarity to successful examples
+* emotional or narrative value
+* humour
+* surprise
+* controversy
+* usefulness
+* quotability
+* campaign requirements
+* expected campaign economics
+
+Scores are versioned and stored alongside their supporting evidence.
+
+This allows ranking decisions to be inspected later rather than producing an unexplained "AI score".
+
+## Video Rendering
+
+Selected moments are rendered using **FFmpeg**.
+
+The rendering pipeline supports:
+
+* vertical **9:16** output
+* H.264 video
+* AAC audio
+* captions
+* watermarks
+* dynamic crops
+* punch-ins and zooms
+* emphasis text
+* freeze frames
+* progress or keyword treatments
+* authorised B-roll
+* images
+* sound effects
+* music
+* picture-in-picture overlays
+
+Creative additions are first stored in an **Enrichment Plan**, preserving what was added, when it appears and why it was selected.
+
+## Rights-Aware Creative Enrichment
+
+Optional media can be discovered from approved or rights-compatible sources.
+
+The project currently includes support for:
+
+* cached authorised assets
+* Openverse
+* optional Pexels integration
+
+Asset metadata can retain information such as:
+
+* provider
+* source URL
+* licence
+* attribution
+* semantic tags
+* stored object reference
+
+If a suitable rights-safe asset cannot be found, enrichment is omitted rather than replaced with unverified media.
+
+## Quality Assurance
+
+Rendered clips pass through a rule engine before approval.
+
+Deterministic checks can include:
+
+* video duration
+* aspect ratio
+* resolution
+* branding
+* caption requirements
+* source provenance
+* campaign-specific mandatory rules
+
+Deterministic failures are kept separate from advisory or AI-evaluated requirements.
+
+A mandatory deterministic failure prevents publication.
+
+This separation prevents an AI judgement from overriding a hard technical or compliance requirement.
+
+## Human-in-the-Loop Review
+
+AI Clipper does **not** automatically publish generated clips.
+
+Once processing is complete, candidates are presented through a review interface where they can be:
+
+* approved
+* rejected
+* changed
+
+Edit requests can create new child versions while preserving the original render and review history.
+
+Supported edit concepts include changes to:
+
+* timing
+* captions
+* crops
+* watermarks
+* headlines
+* B-roll
+* music
+* sound effects
+* zooms and emphasis
+
+Publication or export requires explicit approval.
+
+## Durable Processing Architecture
+
+Long-running media jobs should not depend on a single process surviving until completion.
+
+AI Clipper therefore uses a **database-backed worker architecture**.
+
+The worker system includes:
+
+* persistent job queues
+* stage checkpoints
+* worker leases
+* lease heartbeats
+* retry tracking
+* exponential backoff
+* attempt history
+* recovery of expired jobs
+* idempotency keys
+
+A worker can stop midway through a campaign and another worker can resume from the last persisted checkpoint.
+
+This allows a large campaign to be processed across multiple independent worker executions.
+
+## Persistence
+
+The application supports two persistence configurations.
+
+### Local Development
+
+* SQLite
+* local filesystem storage
+* file-based email sink
+
+### Production Architecture
+
+* PostgreSQL
+* S3-compatible object storage
+* Resend email
+* stateless application workers
+
+The production deployment is designed so that important state does not depend on a particular application instance or local disk surviving.
+
+## Deployment
+
+The repository includes infrastructure for containerised and remote operation.
+
+Supported tooling includes:
+
+* Docker
+* Docker Compose
+* Render
+* GitHub Actions
+* PostgreSQL
+* S3-compatible object storage
+
+The remote architecture separates the web application from background processing.
+
+Scheduled GitHub Actions workers can resume persisted campaigns and process the pipeline without requiring the user's computer or browser to remain active.
+
+## Testing
+
+The project includes automated coverage for areas including:
+
+* API behaviour
+* campaign intake
+* source processing
+* provider integrations
+* worker durability
+* retry and recovery behaviour
+* authentication
+* email
+* rendering
+* QA rules
+* object persistence
+* creative enrichment
+* deployment contracts
+
+The latest recorded full test run contains **52 passing tests**.
+
+Development tooling also includes:
+
+* `pytest`
+* `ruff`
+* CI verification
+* JavaScript syntax checking
+* FFmpeg render validation
+
+## Technology Stack
+
+### Backend
+
+* **Python 3.11+**
+* **FastAPI**
+* **Uvicorn**
+* **Pydantic**
+
+### Data & Persistence
+
+* **SQLite**
+* **PostgreSQL**
+* **psycopg**
+* **S3-compatible object storage**
+* **boto3**
+
+### Media
+
+* **FFmpeg / ffprobe**
+* **Whisper-compatible transcription**
+
+### External Research
+
+* YouTube Data API
+* TikTok oEmbed
+* TikTok Research API
+* Instagram Graph API
+* GDELT
+* Google News RSS
+* Openverse
+* Pexels
+
+### Frontend
+
+* HTML
+* CSS
+* JavaScript
+
+### Infrastructure & Testing
+
+* Docker
+* Docker Compose
+* GitHub Actions
+* Render
+* pytest
+* Ruff
+
+## Repository Structure
+
+```text
+AI-Clipper/
+│
+├── alpha/
+│   ├── main.py             # FastAPI application
+│   ├── pipeline.py         # Durable campaign pipeline
+│   ├── services.py         # Application use cases
+│   ├── domain.py           # Ranking, signals and QA logic
+│   ├── providers.py        # Provider abstractions
+│   ├── live_providers.py   # External research integrations
+│   └── worker.py           # Background worker
+│
+├── migrations/             # SQLite/PostgreSQL migrations
+├── tests/                  # Automated test suite
+├── web/                    # Review dashboard
+├── scripts/                # Development and operations scripts
+├── .github/workflows/      # CI and remote worker automation
+│
+├── ARCHITECTURE.md
+├── IMPLEMENTATION_STATUS.md
+├── PRODUCT_BIBLE.md
+├── TEST_PLAN.md
+├── Dockerfile
+├── docker-compose.yml
+└── pyproject.toml
+```
+
+## Running Locally
+
+Requires **Python 3.11+**.
+
+On Windows:
 
 ```powershell
 .\scripts\dev.ps1
 ```
 
-Open <http://127.0.0.1:8000>. The command creates `.venv`, installs dependencies, starts the API, and runs the durable worker in a background thread for development. Production-style operation uses separate processes:
+The development script prepares the Python environment and starts the FastAPI application together with the local worker.
 
-```powershell
-.\.venv\Scripts\python.exe -m uvicorn alpha.main:app --host 0.0.0.0 --port 8000
-.\.venv\Scripts\python.exe -m alpha.worker
+The application is then available at:
+
+```text
+http://127.0.0.1:8000
 ```
 
-Or run the separated API/worker stack with `docker compose up --build`.
+Production-style API and worker processes can also be run separately:
 
-## Test and demo
-
-```powershell
-.\scripts\test.ps1
-.\.venv\Scripts\python.exe -m alpha.seed
+```bash
+python -m uvicorn alpha.main:app --host 0.0.0.0 --port 8000
+python -m alpha.worker
 ```
 
-The tests render synthetic clips with bundled FFmpeg and demonstrate campaign → durable processing → multiple sources → example/style analysis → social evidence → candidate ranking → rendering/QA → notification/review/edit → approval → idempotent export → performance/feedback → Research Ledger.
+or using Docker:
 
-Run deployment diagnostics before operating a fresh environment:
-
-```powershell
-.\.venv\Scripts\python.exe -m alpha.ops doctor
+```bash
+docker compose up --build
 ```
 
-## Provider modes and external access
+## Current Development Status
 
-`ALPHA_PROVIDER_MODE=fixture` is the deterministic CI/demo path. `manual` retains the audited import-only path. `live` selects the production-capable provider set and fails startup unless `YOUTUBE_API_KEY` exists.
+Most of the V0 architecture is implemented, including:
 
-Live mode provides:
+* campaign intake
+* durable workers
+* strategy generation
+* candidate ranking
+* FFmpeg rendering
+* QA
+* review and editing
+* approval-gated export
+* feedback collection
+* research-led experimentation
+* deployment infrastructure
 
-- YouTube Data API v3 video metadata, paginated playlist expansion, cross-input video-ID deduplication, current YouTube search/statistics and exact source provenance.
-- YouTube captions.list/download through OAuth refresh credentials for caption tracks the OAuth user is permitted to edit. The official API does not allow arbitrary third-party caption downloads.
-- Official TikTok public oEmbed enrichment for supplied examples and the approved TikTok Research API when its token is configured.
-- Instagram professional-account hashtag research when its Graph token/user ID are configured.
-- Public GDELT news signals with Google News RSS fallback; these are explicitly labelled mention signals, not social engagement metrics.
-- Per-source/query provider events so partial failures and access limitations remain visible in `/api/campaigns/{id}/research`.
-- Production email uses Resend when configured; without credentials V0 writes idempotent messages to `data/emails`.
-- Direct posting needs each platform's approved posting API and OAuth credentials; V0 creates an approval-gated manual export instead.
+However, the project should still be considered **in development**.
 
-No adapter may bypass access controls, CAPTCHA, or platform terms.
+A complete production campaign using all required live credentials and external services has not yet passed the final end-to-end acceptance criteria.
 
-For each real YouTube source, ALPHA accepts accessible authorised captions, a transcript pasted
-during intake/remediation, or an authorised video/audio upload linked to its exact video ID. A
-timestamped paste is used directly; plain text is split with estimated timing and clearly labelled.
-When an upload has no supplied transcript, `ALPHA_TRANSCRIPTION_COMMAND` runs a local/free
-Whisper-compatible command that emits timestamped JSON. Live mode refuses to substitute generated
-fixture footage when authorised source media is absent. Source preflight reports metadata,
-transcript, media, research and render readiness before long research begins.
+Some integrations therefore remain implemented but not fully validated against live credentialled environments.
 
-## Configuration
+For detailed status information, see:
 
-Copy `.env.example` values into the process environment. Important settings:
+* [`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md)
+* [`ARCHITECTURE.md`](ARCHITECTURE.md)
 
-- `ALPHA_DATABASE_PATH`: SQLite database path.
-- `ALPHA_STORAGE_PATH`: watermarks, rendered clips, and export packages.
-- `ALPHA_EMAIL_SINK_PATH`: development email messages.
-- `DATABASE_URL`: production Postgres connection string; takes precedence over `ALPHA_DATABASE_PATH`. Use the pooled Neon URL with TLS enabled.
-- `ALPHA_STORAGE_PROVIDER`: `local` for development or `s3` for production.
-- `S3_ENDPOINT_URL`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`: private S3-compatible object storage. For R2, use the account S3 endpoint and region `auto`.
-- `ALPHA_RUN_EMBEDDED_WORKER`: leave `true` locally; the Render Blueprint sets `false` because scheduled compute owns production work.
-- `ALPHA_EMAIL_PROVIDER`: `auto` (Resend when a key exists, otherwise file), `resend`, or `file`.
-- `RESEND_API_KEY`: a Resend sending-access API key.
-- `RESEND_FROM_EMAIL`: sender name/address at a verified Resend domain.
-- `ALPHA_PROVIDER_MODE`: `fixture`, `manual`, or `live`.
-- `YOUTUBE_API_KEY`: Google Cloud YouTube Data API v3 key; required by live mode.
-- `YOUTUBE_OAUTH_CLIENT_ID`, `YOUTUBE_OAUTH_CLIENT_SECRET`, `YOUTUBE_OAUTH_REFRESH_TOKEN`: durable caption authorization using the `youtube.force-ssl` scope. The account must have permission to edit the requested caption tracks.
-- `YOUTUBE_OAUTH_ACCESS_TOKEN`: optional short-lived caption token for temporary testing only.
-- `TIKTOK_CLIENT_KEY` / `TIKTOK_CLIENT_SECRET`: optional approved TikTok Research Tools client; ALPHA renews the two-hour client token automatically. `TIKTOK_RESEARCH_ACCESS_TOKEN` is only a short-lived testing override.
-- `INSTAGRAM_ACCESS_TOKEN` / `INSTAGRAM_USER_ID`: optional Instagram professional-account Graph access.
-- `OPENVERSE_API_TOKEN`: optional Openverse token; anonymous filtered image search remains available.
-- `PEXELS_API_KEY`: optional Pexels photo/video API key.
-- `ALPHA_ASSET_DISCOVERY_TIMEOUT_SECONDS` / `ALPHA_ASSET_DISCOVERY_MAX_BYTES`: bounded provider download controls.
-- `ALPHA_TRANSCRIPTION_COMMAND`: optional Whisper-compatible command containing `{input}` and `{output_dir}`; it must write JSON segments into the output directory.
-- `ALPHA_TRANSCRIPTION_TIMEOUT_SECONDS`: upper bound for that local transcription process.
-- `ALPHA_RESEARCH_REGION`, `ALPHA_RESEARCH_LOOKBACK_DAYS`, `ALPHA_RESEARCH_RESULTS_PER_QUERY`: live research bounds.
-- `ALPHA_API_TOKEN`: optional API token required through `X-Alpha-Token` when configured.
-- `ALPHA_LEASE_SECONDS`: worker lease duration; expired leases are recoverable.
-- `ALPHA_RETRY_BASE_SECONDS` / `ALPHA_MAX_JOB_ATTEMPTS`: persisted retry policy.
-- `ALPHA_REQUIRE_AUTH`: require browser sessions and protected API access.
-- `ALPHA_ADMIN_EMAIL` / `ALPHA_ADMIN_PASSWORD`: required when auth is enabled.
-- `ALPHA_SESSION_HOURS`: session lifetime.
-- `ALPHA_COOKIE_SECURE`: set `true` whenever the site is served over HTTPS.
+## Design Principles
 
-Secrets must be supplied through environment/deployment secret management and must never be committed or logged.
+The project is built around several core principles:
 
-When authentication is enabled, the UI uses a hashed, expiring server-side session, an HttpOnly SameSite cookie and CSRF protection for unsafe methods. Startup fails closed if administrator credentials are missing. This is a single-admin V0 boundary, not a substitute for a production multi-user identity provider.
+* **Human approval before publication**
+* **Evidence-backed recommendations**
+* **Approved-source provenance**
+* **Deterministic rules override advisory AI**
+* **Recoverable long-running jobs**
+* **Provider-independent architecture**
+* **Idempotent external actions**
+* **Rights-aware media handling**
+* **Transparent failure states**
+* **No dependence on a continuously connected browser**
 
-### Resend setup
-
-1. Add and verify a domain in the [Resend dashboard](https://resend.com/docs/dashboard/domains/introduction).
-2. Create a sending-access API key and store it as `RESEND_API_KEY`.
-3. Set `RESEND_FROM_EMAIL`, for example `ALPHA <notifications@updates.example.com>`.
-4. Leave `ALPHA_EMAIL_PROVIDER=auto` or set it explicitly to `resend`.
-5. Run `python -m alpha.ops doctor`; its email check reports readiness without printing the key.
-
-Review-ready messages include the campaign name, sources analysed, research summary, candidates considered, clips produced and review URL. ALPHA supplies its durable notification key to Resend's [idempotency header](https://resend.com/docs/dashboard/emails/idempotency-keys). The file adapter remains the credential-free local/CI fallback.
-
-## Remote deployment
-
-[`render.yaml`](./render.yaml) defines a diskless Render Free web service. It may sleep after inactivity: all state is external, and [`.github/workflows/alpha-worker.yml`](./.github/workflows/alpha-worker.yml) wakes a fresh worker hourly to run the complete 13-stage campaign within a bounded 120-minute invocation. `workflow_dispatch` provides an immediate first invocation. If an invocation is interrupted, its persisted checkpoint lets the next hourly or manual invocation resume it. No Render persistent disk or continuously awake process is required.
-
-### 1. Create the free persistence services
-
-1. Create a [Neon Free project](https://neon.com/pricing). Copy its **pooled** Postgres connection string, including `sslmode=require`, as `DATABASE_URL`. Free currently includes 0.5 GB storage and 100 CU-hours per project; compute scales to zero when idle.
-2. In Cloudflare, [enable R2](https://developers.cloudflare.com/r2/get-started/), create a **Standard** bucket, then create an R2 S3 API token scoped read/write to only that bucket. Record:
-   - `S3_ENDPOINT_URL=https://<account-id>.r2.cloudflarestorage.com`
-   - `S3_REGION=auto`
-   - `S3_BUCKET=<bucket-name>`
-   - `S3_ACCESS_KEY_ID=<token access key>`
-   - `S3_SECRET_ACCESS_KEY=<token secret>`
-3. R2 requires completing its subscription/checkout flow, but its [Standard free allowance](https://developers.cloudflare.com/r2/pricing/) is currently 10 GB-month, 1 million Class A writes, 10 million Class B reads and free egress. Set a billing notification/limit appropriate to the account.
-
-### 2. Deploy the sleeping web application
-
-1. Push the repository to GitHub. In Render, choose **New → Blueprint**, connect the repository, and approve `render.yaml`.
-2. Enter every `sync: false` value requested by the Blueprint:
-   - `ALPHA_ADMIN_EMAIL`
-   - `ALPHA_ADMIN_PASSWORD`
-   - `DATABASE_URL`
-   - `S3_ENDPOINT_URL`
-   - `S3_BUCKET`
-   - `S3_ACCESS_KEY_ID`
-   - `S3_SECRET_ACCESS_KEY`
-   - `YOUTUBE_API_KEY`
-   - `RESEND_API_KEY`
-   - `RESEND_FROM_EMAIL`
-3. Optional credential/configuration fields remain `YOUTUBE_OAUTH_CLIENT_ID`, `YOUTUBE_OAUTH_CLIENT_SECRET`, `YOUTUBE_OAUTH_REFRESH_TOKEN`, `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET`, `INSTAGRAM_ACCESS_TOKEN`, `INSTAGRAM_USER_ID`, `OPENVERSE_API_TOKEN`, `PEXELS_API_KEY`, and `ALPHA_TRANSCRIPTION_COMMAND`.
-4. Open `/api/health`. `ALPHA_BASE_URL` falls back to Render's `RENDER_EXTERNAL_URL`, so review emails target the deployed dashboard.
-
-### 3. Configure unattended worker invocations
-
-In the GitHub repository, add Actions secrets with the same names/values for `DATABASE_URL`, all five `S3_*` values, `YOUTUBE_API_KEY`, `RESEND_API_KEY`, and `RESEND_FROM_EMAIL`. Add `ALPHA_BASE_URL` with the full Render URL. Add optional platform, asset-provider and transcription-command secrets if available. Enable Actions, open **ALPHA scheduled worker**, and run it once with **Run workflow**; that invocation attempts every remaining stage, and the hourly schedule remains as automatic recovery without the browser or laptop. The workflow validates the required secrets before installing dependencies and fails explicitly instead of silently falling back to an empty local SQLite database.
-
-The workflow's hourly cadence is intentionally below GitHub Free's 2,000 private-repository minutes: one-minute billing would consume approximately 720 minutes in a 30-day month, leaving roughly 1,280 minutes for setup and active renders. Standard runners are free for public repositories. If actual private-repository rendering exceeds the remaining allowance, reduce the cadence, make the repository public if appropriate, or accept GitHub's metered Linux-runner overage; no application migration is required.
-
-### Current £0 limits
-
-- Neon Free: 0.5 GB database storage and 100 CU-hours per project/month.
-- Cloudflare R2 Standard: 10 GB-month, 1 million Class A operations, 10 million Class B operations/month, and free egress.
-- [Render Free](https://render.com/docs/free): 750 running instance-hours/workspace/month; sleeps after 15 minutes without inbound traffic and loses local files by design.
-- [GitHub Actions](https://docs.github.com/en/billing/concepts/product-billing/github-actions): free standard runners for public repositories; 2,000 included minutes/month on GitHub Free private repositories. [Scheduled workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule) can be delayed and public-repository schedules disable after 60 days without repository activity.
-- Resend: use its current free/low-cost allowance; the sending domain must be verified.
-
-There is no unavoidable monthly component at this scale. Exceeding a provider allowance may suspend work or incur that provider's published usage charge, so inspect usage after the first real campaign.
-
-## Optional creative enrichment
-
-Campaign intake preserves the raw brief but asks only whether music, memes/reactions, B-roll, SFX,
-external images and external video are permitted, plus unusual instructions. Users do not upload or
-tag an asset catalogue for each campaign. The planner decides whether each permitted technique
-helps based on example/style research, niche, pacing, humour, emotion, the source moment and
-campaign rules, and records why every type was used or omitted.
-
-The worker searches already cached licensed assets first. In live mode it can then query Openverse
-and, when `PEXELS_API_KEY` is present, Pexels; each accepted result retains provider identity, source
-and licence URL, attribution, semantic tags and the private cached object URI. Results that do not
-declare commercial use and modification permission are rejected. If no rights-safe match exists,
-that enrichment is omitted and rendering continues—ALPHA never scrapes image search or copied meme,
-music or video libraries.
-
-The worker persists an evidence-backed Enrichment Plan before FFmpeg rendering. Supported
-composition includes music loops/fades/speech ducking, timed SFX, image/video full-screen/PiP/
-overlays, and native punch-in, dynamic crop/speaker focus, freeze, emphasis text, keyword/progress/
-pull-quote treatment, blur, fast-cut and reaction-hold events. The review timeline shows timestamps,
-reason, provider and licence/provenance. Requests such as `remove the meme`, `use less B-roll`,
-`change the music`, `make the music quieter`, `no sound effects`, and `add a reaction at the
-punchline` create immutable child versions.
-
-ALPHA ships no copied third-party catalogue and requires no paid asset provider. Provider licence
-metadata is preserved for audit and review but should still be checked for the intended campaign.
-
-## Durable processing model
-
-Each worker acquisition leases exactly one stage and actively renews that lease while the stage runs. The output and completed-stage checkpoint are committed before the next stage is queued. A killed worker's lease expires and another worker resumes the same stage; stale workers cannot commit after losing their token. Retry availability, exponential backoff and every attempt are persisted, while completed side effects are protected by stable uniqueness/idempotency keys. Logical jobs can therefore span many worker executions and do not assume one process lives for 72 hours.
-
-## Approval and compliance invariants
-
-- Only `SourceItem` records descended from the campaign's `ApprovedSource` set can become candidates.
-- Deterministic and AI-evaluated QA are stored separately.
-- A mandatory deterministic failure blocks approval and publication.
-- Audited requirement revisions preserve the old value and trigger QA re-evaluation; invalidated approvals are revoked.
-- Publication requires a persisted approval record and an idempotency key.
-- Publication must use an enabled connected account selected by that campaign.
-- Change requests create child variants; parent renders and review history remain intact.
-- Prediction scores and the strategy policy version are recorded before outcomes.
-
-## Backup, restore, and retention
-
-Local SQLite only: create a consistent backup with:
-
-```powershell
-.\.venv\Scripts\python.exe -m alpha.ops backup --destination backups\alpha.db
-```
-
-For production, use Neon's restore/history or `pg_dump`; `alpha.ops backup` refuses to treat a Postgres URL as a SQLite file. R2 objects are durable independently of app/worker restarts. Preserve the database and bucket as one logical backup set because database rows reference private `s3://` object URIs.
-
-Retention cleanup is dry-run by default and only targets generated `.ppm`/manifest render intermediates, never source assets, final MP4s, uploads, evidence, or history:
-
-```powershell
-.\.venv\Scripts\python.exe -m alpha.ops cleanup --older-than-days 30
-.\.venv\Scripts\python.exe -m alpha.ops cleanup --older-than-days 30 --apply
-```
-
-## Repository map
-
-- `alpha/main.py`: FastAPI endpoints and static dashboard.
-- `alpha/pipeline.py`: leased queue and resumable campaign stages.
-- `alpha/services.py`: campaign, review, publication, feedback, and experiment use cases.
-- `alpha/domain.py`: scoring, signals, edit parsing, and deterministic QA.
-- `alpha/providers.py`: compliant provider abstractions and local/fixture adapters.
-- `alpha/live_providers.py`: official/permitted YouTube, TikTok, Instagram and wider-web provider clients.
-- `alpha/cloud.py`: stateless web entry point with optional local/opportunistic worker.
-- `render.yaml`: diskless Render Free deployment Blueprint.
-- `.github/workflows/alpha-worker.yml`: scheduled bounded worker invocations.
-- `migrations/`: additive SQLite/Postgres schema.
-- `web/`: responsive review dashboard.
-- `tests/`: unit, API, durability, invariant, and end-to-end coverage.
+These constraints turn AI Clipper from a simple video-cutting script into an exploration of how research, automation, media processing and human judgement can be combined into a reliable content-production system.
